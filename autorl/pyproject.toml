@@ -1,0 +1,47 @@
+[project]
+name = "autorl"
+version = "0.1.0"
+description = "Multi-Agent Reinforcement Learning Orchestration for WeaveHacks"
+requires-python = ">=3.12"
+dependencies = [
+    "weave",
+    "anthropic",
+    "pydantic>=2.0",
+    "fastapi",
+    "uvicorn[standard]",
+    "copilotkit",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+training = [
+    "stable-baselines3",
+    "gymnasium[mujoco]",
+    "torch",
+    "trl",
+    "transformers",
+    "peft",
+    "datasets",
+    "accelerate",
+    "bitsandbytes",
+]
+
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
