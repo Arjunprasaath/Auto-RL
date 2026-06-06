@@ -16,11 +16,14 @@ copilotkit
 python-dotenv
 
 # --- Local RL training (MuJoCo: PPO / SAC / A2C on Mac) ---
+# Versions below are verified working on macOS arm64 + Python 3.12.
 # gymnasium>=1.0 is required for the *-v5 envs (HalfCheetah-v5, Hopper-v5).
-stable-baselines3[extra]
-gymnasium[mujoco]>=1.0
-imageio[ffmpeg]
-torch
+stable-baselines3[extra]>=2.8.0
+gymnasium[mujoco]>=1.2.0
+mujoco>=3.9.0
+imageio[ffmpeg]>=2.37.0
+imageio-ffmpeg>=0.6.0
+torch>=2.7.0
 
 # --- GRPO / Countdown training (RunPod GPU only; not needed for local race) ---
 # Install these on the RunPod pod, not on the Mac. Uncomment if running locally.
