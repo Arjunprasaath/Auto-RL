@@ -1,9 +1,9 @@
 # Person A — AI Build Guide
-## Orchestration · CopilotKit UI · Doom Loop Sentinel · Evaluation
+## Classic RL Training · Orchestration · CopilotKit UI · Doom Loop Sentinel · Evaluation
 
-> **Your AI builds:** Orchestrator agent · Sentinel agent · Evaluator agent · asyncio swarm runner · CopilotKit frontend (Next.js) · Weave integration · Pydantic schemas
+> **Your AI builds:** PPO training script · SAC training script · MuJoCo video render · Orchestrator agent · Sentinel agent · Evaluator agent · asyncio swarm runner · CopilotKit frontend (Next.js) · Weave integration · Pydantic schemas
 
-> **You do NOT build:** Training scripts · RunPod pod manager · Countdown environment · Video render · Countdown inference. Person B owns these.
+> **You do NOT build:** A2C training script · Countdown environment · GRPO training · Countdown inference · Race Dashboard · Model Viewer. Person B owns these.
 
 > **Interface with Person B:** You write `spawn_plan.json`. Person B reads it. Person B writes `eval_result.json` + `heartbeat.json`. You read them. That is the only dependency.
 
@@ -79,6 +79,10 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "copilotkit",
+    "stable-baselines3[extra]",
+    "gymnasium[mujoco]",
+    "imageio[ffmpeg]",
+    "torch",
 ]
 ```
 
@@ -93,9 +97,149 @@ WEAVE_PROJECT=autorl
 
 ---
 
-## Phase 1 — Hours 0–4: Orchestrator Agent
+## Phase 1 — Hours 0–4: RL Training Scripts (ML Work)
 
-### 1.1 `orchestrator/orchestrator_agent.py`
+### 1.1 `training/train_ppo.py` — PPO Training Script
+
+Person A owns the PPO and SAC scripts that run locally on MuJoCo. Build PPO first — SAC derives from it.
+
+```python
+import argparse, json, time, os, weave
+from stable_baselines3 import PPO
+from stable_baselines3.common.evaluation import evaluate_policy
+from training.callbacks.heartbeat_writer import HeartbeatWriter
+from training.callbacks.weave_callback import WeaveLogCallback
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent-id", required=True)
+    parser.add_argument("--env-id", default="HalfCheetah-v5")
+    parser.add_argument("--time-budget", type=int, default=600)  # seconds
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--results-dir", default="./results")
+    args = parser.parse_args()
+
+    os.makedirs(f"{args.results_dir}/{args.agent_id}", exist_ok=True)
+
+    hb = HeartbeatWriter(args.agent_id, args.results_dir)
+    hb.start()
+
+    weave.init("autorl")
+    model = PPO("MlpPolicy", args.env_id,
+                learning_rate=args.lr, seed=args.seed, verbose=0)
+    cb = WeaveLogCallback(args.agent_id)
+
+    start = time.time()
+    total_steps = 0
+    CHUNK = 5000
+
+    while time.time() - start < args.time_budget:
+        model.learn(total_timesteps=CHUNK, callback=cb, reset_num_timesteps=False)
+        total_steps += CHUNK
+
+        last_r = cb.ep_returns[-1] if cb.ep_returns else 0.0
+        hb.update(total_steps, last_r, loss=None)
+
+        # Check for Sentinel nudge
+        nudge = hb.check_nudge()
+        if nudge:
+            new_lr = nudge.get("lr", args.lr)
+            model.policy.optimizer.param_groups[0]["lr"] = new_lr
+            print(f"[{args.agent_id}] Nudged: lr={new_lr}")
+
+    mean_r, std_r = evaluate_policy(model, model.get_env(), n_eval_episodes=20)
+
+    ckpt = f"{args.results_dir}/{args.agent_id}/model.zip"
+    model.save(ckpt)
+
+    result = {
+        "agent_id": args.agent_id, "algo": "PPO",
+        "env": args.env_id, "status": "completed",
+        "mean_return": float(mean_r), "std_return": float(std_r),
+        "steps_trained": total_steps,
+        "wall_time_s": time.time() - start,
+        "weave_run_id": "", "checkpoint_path": ckpt,
+    }
+    with open(f"{args.results_dir}/{args.agent_id}/eval_result.json", "w") as f:
+        json.dump(result, f)
+
+    hb.stop("completed")
+
+if __name__ == "__main__":
+    main()
+```
+
+> **NaN HANDLING:** When `--lr 1.0` (the deliberately bad agent), training produces NaN loss within ~100 steps. The heartbeat writer detects this and sets `anomaly="nan_loss"`. The Sentinel reads this and kills the agent. The training script does NOT need to handle NaN — the Sentinel handles it.
+
+### 1.2 `training/train_sac.py` — SAC Training Script
+
+Derive from `train_ppo.py` — three changes only: import, model class, algo name in result dict. SAC is off-policy and typically outperforms PPO on MuJoCo locomotion in the same time budget, so it should win the local race.
+
+```python
+from stable_baselines3 import SAC
+
+# Same CLI args and loop as train_ppo.py.
+# Key difference: SAC uses a replay buffer.
+model = SAC("MlpPolicy", args.env_id,
+            learning_rate=args.lr,
+            buffer_size=100_000,
+            learning_starts=1000,   # reward=0 for first ~1000 steps — expected
+            seed=args.seed, verbose=0)
+
+# In the result dict: "algo": "SAC"
+```
+
+Verify locally before integration:
+```bash
+python training/train_sac.py --agent-id test_sac --env-id HalfCheetah-v5 --time-budget 120 --lr 3e-4
+# Expect mean_return ~500-1500 after 2 min (needs replay warmup)
+```
+
+### 1.3 `model_viewer/render_mujoco.py` — MuJoCo Video Render
+
+After the Evaluator picks the best MuJoCo agent, the Orchestrator calls this script. The video path is sent to Person B's ModelViewer component.
+
+```python
+import gymnasium, imageio, argparse
+from stable_baselines3 import PPO, SAC, A2C
+
+ALGO_MAP = {"PPO": PPO, "SAC": SAC, "A2C": A2C}
+
+def render_video(checkpoint_path: str, env_id: str, algo: str,
+                 output_path: str, n_steps: int = 500):
+    env = gymnasium.make(env_id, render_mode="rgb_array")
+    model = ALGO_MAP[algo].load(checkpoint_path)
+
+    obs, _ = env.reset()
+    frames = []
+
+    for _ in range(n_steps):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
+        frames.append(env.render())
+        if terminated or truncated:
+            obs, _ = env.reset()
+
+    imageio.mimsave(output_path, frames, fps=30)
+    env.close()
+    print(f"Video saved: {output_path}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--env-id", default="HalfCheetah-v5")
+    parser.add_argument("--algo", default="SAC")
+    parser.add_argument("--output", default="results/best_mujoco.mp4")
+    args = parser.parse_args()
+    render_video(args.checkpoint, args.env_id, args.algo, args.output)
+```
+
+---
+
+## Phase 2 — Hours 4–8: Orchestrator Agent
+
+### 2.1 `orchestrator/orchestrator_agent.py`
 
 The Orchestrator takes a user prompt, decides environment family, selects algorithms, and emits `spawn_plan.json`. An LLM call makes these decisions — this is what makes it agentic.
 
@@ -124,7 +268,7 @@ Available environments:
 Rules:
 - Output valid JSON array matching SpawnPlanEntry schema
 - Use different seeds for same-algo agents
-- Include exactly one GRPO agent with lr=1.0 to test fault tolerance
+- Include exactly one agent with lr=1.0 to test fault tolerance
 - Default to N=4 unless user specifies otherwise
 
 Output ONLY the JSON array, no other text.
@@ -144,7 +288,6 @@ async def create_spawn_plan(task: str) -> list[SpawnPlanEntry]:
         try:
             raw = json.loads(response.content[0].text)
             plan = [SpawnPlanEntry(**entry) for entry in raw]
-            # Write to disk
             with open("spawn_plan.json", "w") as f:
                 json.dump([e.model_dump() for e in plan], f)
             return plan
@@ -153,11 +296,9 @@ async def create_spawn_plan(task: str) -> list[SpawnPlanEntry]:
     return default_plan()  # hard-coded fallback
 ```
 
-### 1.2 `orchestrator/swarm_runner.py`
+### 2.2 `orchestrator/swarm_runner.py`
 
 The asyncio event loop that spawns all agents in parallel.
-
-**What the AI must build:**
 
 ```python
 import asyncio, weave
@@ -168,20 +309,18 @@ async def run_swarm(plan: list[SpawnPlanEntry]) -> list[EvalResult]:
     sentinel_task = asyncio.create_task(
         run_sentinel(agent_ids=[e.id for e in plan], stop_event=stop_event)
     )
-    
+
     training_tasks = [
         asyncio.create_task(run_training_agent(entry))
         for entry in plan
     ]
-    
-    # Wait for all training agents (with timeout)
+
     max_budget = max(e.time_budget_min for e in plan) + 2  # 2 min grace
     await asyncio.wait(training_tasks, timeout=max_budget * 60)
-    
+
     stop_event.set()
     await sentinel_task
-    
-    # Collect results
+
     results = []
     for entry in plan:
         result_path = f"results/{entry.id}/eval_result.json"
@@ -191,15 +330,15 @@ async def run_swarm(plan: list[SpawnPlanEntry]) -> list[EvalResult]:
     return results
 ```
 
-### 1.3 `agents/training_agent.py`
+### 2.3 `agents/training_agent.py`
 
-Wraps Person B's training scripts as asyncio subprocesses.
+Wraps training scripts as asyncio subprocesses. For PPO and SAC (local, your scripts), launch directly. For A2C (local, Person B's script) and GRPO (RunPod, Person B's script), same pattern — the wrapper doesn't care who wrote the script.
 
 ```python
 @weave.op(name="TrainingAgent_{entry.id}_{entry.algo}")
 async def run_training_agent(entry: SpawnPlanEntry):
     os.makedirs(f"results/{entry.id}", exist_ok=True)
-    
+
     if entry.exec == "local":
         script = f"training/train_{entry.algo.lower()}.py"
         cmd = [
@@ -213,23 +352,22 @@ async def run_training_agent(entry: SpawnPlanEntry):
         ]
         process = await asyncio.create_subprocess_exec(*cmd)
         await process.wait()
-    
+
     elif entry.exec == "runpod":
-        # Call Person B's pod_manager to SSH and run the script
         from runpod.pod_manager import ssh_exec
-        cmd = f"python /workspace/training/train_grpo_countdown.py " \
-              f"--agent-id {entry.id} --time-budget {entry.time_budget_min * 60} " \
-              f"--seed {entry.hparams.get('seed', 42)} --lr {entry.hparams.get('lr', 1e-6)}"
+        cmd = (
+            f"python /workspace/training/train_grpo_countdown.py "
+            f"--agent-id {entry.id} --time-budget {entry.time_budget_min * 60} "
+            f"--seed {entry.hparams.get('seed', 42)} --lr {entry.hparams.get('lr', 1e-6)}"
+        )
         ssh_exec(POD_ID, cmd)
 ```
 
-> **KEY INSIGHT:** The Training Agent wrapper does NOT contain RL logic. It launches Person B's training scripts as subprocesses. Person A never writes RL code.
-
 ---
 
-## Phase 2 — Hours 4–8: Sentinel & CopilotKit Scaffold
+## Phase 3 — Hours 8–14: Sentinel & CopilotKit Scaffold
 
-### 2.1 `agents/sentinel.py` — Doom Loop Sentinel
+### 3.1 `agents/sentinel.py` — Doom Loop Sentinel
 
 ```python
 import asyncio, json, weave, os
@@ -253,17 +391,17 @@ async def run_sentinel(
         for agent_id in agent_ids:
             if agent_id in killed:
                 continue
-            
+
             hb_path = f"{results_dir}/{agent_id}/heartbeat.json"
             if not os.path.exists(hb_path):
                 continue
-            
+
             with open(hb_path) as f:
                 hb = Heartbeat(**json.load(f))
-            
+
             now = datetime.now(timezone.utc)
             age_s = (now - hb.timestamp).total_seconds()
-            
+
             # NaN: skip nudge, immediate kill+restart
             if hb.anomaly == "nan_loss":
                 if agent_id not in restarted:
@@ -273,12 +411,11 @@ async def run_sentinel(
                     await _kill_permanently(agent_id)
                     killed.add(agent_id)
                 continue
-            
-            # Stale heartbeat
+
             if age_s > nudge_threshold_s and agent_id not in nudged:
                 await _nudge(agent_id, results_dir)
                 nudged[agent_id] = now
-            
+
             elif age_s > kill_threshold_s and agent_id in nudged:
                 if agent_id not in restarted:
                     await _kill_and_restart(agent_id, "stale_after_nudge")
@@ -286,15 +423,15 @@ async def run_sentinel(
                 else:
                     await _kill_permanently(agent_id)
                     killed.add(agent_id)
-        
+
         await asyncio.sleep(check_interval)
 ```
 
-**Nudge implementation:** Write `results/{agent_id}/nudge.json` with `{"lr": current_lr / 2, "seed": new_seed}`. Person B's heartbeat writer checks for this file every 60s, applies new hparams, deletes the file.
+**Nudge implementation:** Write `results/{agent_id}/nudge.json` with `{"lr": current_lr / 2, "seed": new_seed}`. Person B's `HeartbeatWriter.check_nudge()` picks this up on every 60s tick, applies the new hparams, and deletes the file. Your PPO/SAC scripts do the same via `hb.check_nudge()`.
 
 **Kill + restart:** Put the agent PID in a shared dict. Call `process.terminate()`. Request the swarm runner (via `asyncio.Queue`) to spawn a replacement with `lr=3e-4` and a new seed.
 
-### 2.2 CopilotKit Next.js App
+### 3.2 CopilotKit Next.js App
 
 ```bash
 cd autorl/ui
@@ -352,11 +489,25 @@ export default function Home() {
 }
 ```
 
+### 3.3 `ui/components/ApprovalCard.tsx` + `SentinelAlert.tsx`
+
+**ApprovalCard:** rendered by `useCopilotAction` when the Orchestrator proposes a spawn plan. Shows algo list, env targets, estimated cost, Approve/Reject buttons.
+
+**SentinelAlert.tsx:**
+
+```typescript
+// Renders as a warning card in the CopilotKit chat when Sentinel fires:
+// "⚠ Agent 4 (PPO lr=1.0) — NaN loss detected. Killing and restarting with lr=3e-4."
+// Use useCopilotAction with name "sentinel_alert"
+```
+
+> **Race Dashboard and Model Viewer are built by Person B.** Your job is to push the right state from the swarm runner so those components have data to render. After every heartbeat read cycle, push agent status updates to CopilotKit state. After the Evaluator returns, send the video path and countdown_solve.json path as state updates.
+
 ---
 
-## Phase 3 — Hours 8–14: Weave, Dashboard & Integration
+## Phase 4 — Hours 14–28: Weave, Evaluator & Pipeline Entry Point
 
-### 3.1 `orchestrator/main.py` — Pipeline Entry Point
+### 4.1 `orchestrator/main.py` — Pipeline Entry Point
 
 ```python
 import weave, asyncio, json, os
@@ -378,92 +529,52 @@ if __name__ == "__main__":
     asyncio.run(main(task))
 ```
 
-### 3.2 CopilotKit Race Dashboard
-
-**`ui/components/RaceDashboard.tsx`** — shows live agent cards:
-
-```typescript
-// Each card shows:
-// - Agent name (e.g. "Agent 2 — SAC — HalfCheetah")
-// - Status badge: "starting" (gray), "training" (blue pulse), 
-//                 "completed" (green), "failed/restarted" (red)
-// - Progress bar: time elapsed / time budget
-// - Current reward: latest heartbeat value, updates every 30s
-// - Sentinel alert overlay if agent was nudged or restarted
-```
-
-Use `useCoAgentStateRender` to subscribe to state updates from the Orchestrator. The Orchestrator should push state after every heartbeat read cycle.
-
-**`ui/components/SentinelAlert.tsx`:**
-
-```typescript
-// Renders as a warning card in the CopilotKit chat when Sentinel fires:
-// "⚠ Agent 4 (GRPO lr=1.0) — NaN loss detected. Killing and restarting with lr=3e-4."
-// Use useCopilotAction with name "sentinel_alert"
-```
-
-**`ui/components/ModelViewer.tsx`:**
-
-After evaluation, render two sections:
-
-1. **MuJoCo:** HTML5 `<video>` player loading `results/best_mujoco.mp4` from Person B's render script
-2. **Countdown:** animated step-by-step solver — display each puzzle, then reveal the model's chain-of-thought and whether it succeeded. Use a simple card layout with the puzzle `[4, 7, 2, 9] → 24` and the model's reasoning steps below it
-
-### 3.3 Checkpoint — Hour 10: Weave Trace Review
+### 4.2 Checkpoint — Hour 10: Weave Trace Review
 
 Run the pipeline with a mock training script that writes dummy `eval_result.json` after 10 seconds. Verify in Weave:
 
-- `AutoRL_Pipeline` → `Orchestrator` → `SwarmRunner` → `TrainingAgent_agent_1`, `TrainingAgent_agent_2`, `DoomLoopSentinel` → `Evaluator` all appear as named nodes in the trace tree
-- Online eval chart shows streaming values from the mock callback
+- `AutoRL_Pipeline` → `Orchestrator` → `SwarmRunner` → `TrainingAgent_agent_1`, `TrainingAgent_agent_2`, `DoomLoopSentinel` → `Evaluator` all appear as named nodes
+- If the trace looks flat (no hierarchy), check that `@weave.op` calls are nested inside parent `@weave.op` calls
 
-If the trace looks flat (no hierarchy), check that `@weave.op` calls are nested inside parent `@weave.op` calls, not called independently.
-
----
-
-## Phase 4 — Hours 14–28: Evaluator, Reporter & Polish
-
-### 4.1 `evaluator/evaluator_agent.py`
+### 4.3 `evaluator/evaluator_agent.py`
 
 ```python
 @weave.op(name="Evaluator")
 async def evaluate_results(results: list[EvalResult]) -> dict:
-    # Group by environment family
     mujoco_results = [r for r in results if r.env != "Countdown"]
     countdown_results = [r for r in results if r.env == "Countdown"]
-    
+
     rankings = {}
-    
+
     for group_name, group in [("MuJoCo", mujoco_results), ("Countdown", countdown_results)]:
         if not group:
             continue
-        
-        # LLM call to reason about rankings (NOT a fixed formula)
+
         prompt = f"""Rank these RL training results for {group_name}:
 
 {json.dumps([r.model_dump() for r in group], indent=2)}
 
-Consider: mean return (higher is better), stability (lower std), 
+Consider: mean return (higher is better), stability (lower std),
 sample efficiency, and whether the agent completed or failed.
 Note any Sentinel interventions (status=restarted).
 
 Output JSON: [{{"rank": 1, "agent_id": "...", "algo": "...", "rationale": "..."}}]"""
-        
+
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-5",
             messages=[{"role": "user", "content": prompt}]
         )
         rankings[group_name] = json.loads(response.content[0].text)
-    
-    # Push to Weave Evaluation
+
     _push_weave_evaluation(results, rankings)
-    
+
     with open("rankings.json", "w") as f:
         json.dump(rankings, f)
-    
+
     return rankings
 ```
 
-### 4.2 Weave Evaluation Integration
+### 4.4 Weave Evaluation Integration
 
 ```python
 class ReturnScorer(weave.Scorer):
@@ -481,9 +592,9 @@ evaluation = weave.Evaluation(
 await evaluation.evaluate(evaluator_fn)
 ```
 
-### 4.3 `evaluator/reporter.py`
+### 4.5 `evaluator/reporter.py`
 
-Template fill — no LLM call needed here. Just format `rankings.json` into `run_report.md`:
+Template fill — no LLM call needed. Format `rankings.json` into `run_report.md`:
 
 ```markdown
 # AutoRL Run Report
@@ -494,27 +605,27 @@ Template fill — no LLM call needed here. Just format `rankings.json` into `run
 1. SAC — HalfCheetah-v5 — mean_return: 5231 — {rationale}
 2. PPO — HalfCheetah-v5 — mean_return: 3012 — {rationale}
 
-## Countdown Results  
+## Countdown Results
 1. GRPO seed=42 — mean_return: 0.67 — {rationale}
 2. GRPO seed=123 (restarted by Sentinel) — mean_return: 0.61 — {rationale}
 
 ## Sentinel Interventions
-- Agent 4 (GRPO lr=1.0): NaN loss at step 45 → killed + restarted with lr=3e-4
+- Agent 4 (PPO lr=1.0): NaN loss at step 45 → killed + restarted with lr=3e-4
 ```
 
-### 4.4 Hour 16 Hard Gate
+### 4.6 Hour 16 Hard Gate
 
 > **STOP AND VERIFY:** PPO + SAC on HalfCheetah, both local, through the complete pipeline: Orchestrator → spawn → Training Agents → heartbeats → Sentinel monitoring → Evaluator → rankings → CopilotKit UI showing results. If this is not green by Hour 16, do not touch RunPod until it is.
 
-### 4.5 Model-in-Action Trigger
+### 4.7 Model-in-Action Trigger
 
 After Evaluator returns, the Orchestrator:
 
-1. Identifies the best MuJoCo checkpoint path from `rankings.json`
-2. Calls `subprocess.run(["python", "model_viewer/render_mujoco.py", "--checkpoint", path, "--output", "results/best_mujoco.mp4"])`
-3. Identifies the best Countdown checkpoint path
-4. Calls `subprocess.run(["python", "model_viewer/countdown_inference.py", "--checkpoint", path, "--output", "results/countdown_solve.json"])`
-5. Sends both file paths to CopilotKit for the `ModelViewer` component to render
+1. Identifies the best MuJoCo checkpoint from `rankings.json`
+2. Calls `subprocess.run(["python", "model_viewer/render_mujoco.py", "--checkpoint", path, "--algo", algo, "--output", "results/best_mujoco.mp4"])` — your script
+3. Identifies the best Countdown checkpoint
+4. Calls `subprocess.run(["python", "model_viewer/countdown_inference.py", "--checkpoint", path, "--output", "results/countdown_solve.json"])` — Person B's script
+5. Sends both file paths to CopilotKit state for Person B's `ModelViewer` component to render
 
 ---
 
@@ -522,7 +633,7 @@ After Evaluator returns, the Orchestrator:
 
 ### 5.1 Sentinel Demo Verification
 
-Confirm that `agent_4` (with `lr=1.0`) triggers the Sentinel during every run. The heartbeat should show `anomaly: "nan_loss"` within 30-60 seconds of training start. Verify the Sentinel alert card appears in CopilotKit.
+Confirm that the `lr=1.0` agent triggers the Sentinel during every run. The heartbeat should show `anomaly: "nan_loss"` within 30–60 seconds. Verify the SentinelAlert card appears in CopilotKit.
 
 ### 5.2 Set Weave Project to Public
 
@@ -537,28 +648,7 @@ In the W&B dashboard: Settings → Privacy → set to Public. Copy the Weave pro
 
 ### 5.4 README.md
 
-```markdown
-# AutoRL — Multi-Agent RL Orchestration
-
-AutoRL takes a natural language RL task and races competing algorithms in parallel,
-supervised by a Doom Loop Sentinel that detects and recovers stuck agents.
-
-## Architecture
-[architecture diagram or screenshot]
-
-## Setup
-git clone ...
-pip install -e .
-cp .env.template .env  # fill in your keys
-cd ui && npm install
-
-## Run
-python orchestrator/main.py
-# or: cd ui && npm run dev
-
-## Weave project: [URL]
-## Demo video: [URL]
-```
+Already written at the repo root. Update the Weave project URL and demo video link after Hour 32.
 
 ---
 
