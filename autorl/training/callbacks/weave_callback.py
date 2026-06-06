@@ -1,18 +1,20 @@
 """
-WeaveLogCallback — Stable-Baselines3 callback that tracks episode returns and
-logs progress (intended to push to Weave).
+WeaveLogCallback — Stable-Baselines3 callback that logs episode returns.
 
-NOTE: This is a Person A local stub so that train_ppo.py / train_sac.py are
-testable end-to-end before Person B's real implementation lands. It mirrors the
-exact interface defined in the Person B Build Guide (Phase 1.2):
+Imported by all local MuJoCo training scripts:
+    train_ppo.py, train_sac.py, train_a2c.py
 
-    cb = WeaveLogCallback(agent_id)
-    model.learn(total_timesteps=CHUNK, callback=cb, reset_num_timesteps=False)
-    last_r = cb.ep_returns[-1] if cb.ep_returns else 0.0
+Tracks episode returns and prints a rolling average every `log_freq` steps.
+The `ep_returns` list is read by training scripts to get the latest reward
+for heartbeat updates.
 
-Swapping in Person B's version requires no changes to the training scripts.
+Usage:
+    cb = WeaveLogCallback(agent_id="agent_1")
+    model.learn(total_timesteps=5000, callback=cb, reset_num_timesteps=False)
+    last_reward = cb.ep_returns[-1] if cb.ep_returns else 0.0
 """
 
+import weave
 from stable_baselines3.common.callbacks import BaseCallback
 
 
@@ -24,12 +26,33 @@ class WeaveLogCallback(BaseCallback):
         self.ep_returns: list[float] = []
 
     def _on_step(self) -> bool:
+        # SB3 populates infos with episode stats when an episode ends
         for info in self.locals.get("infos", []):
             if "episode" in info:
-                self.ep_returns.append(info["episode"]["r"])
+                ep_return = float(info["episode"]["r"])
+                self.ep_returns.append(ep_return)
 
         if self.num_timesteps % self.log_freq == 0 and self.ep_returns:
-            recent = self.ep_returns[-10:]
-            mean_r = sum(recent) / len(recent)
-            print(f"[{self.agent_id}] step={self.num_timesteps} return={mean_r:.1f}")
+            window = self.ep_returns[-10:]
+            mean_r = sum(window) / len(window)
+            print(
+                f"[{self.agent_id}] "
+                f"step={self.num_timesteps:>8,} "
+                f"ep_return={mean_r:>8.1f} "
+                f"(last {len(window)} eps)"
+            )
+            self._log_to_weave(mean_r)
+
         return True
+
+    def _log_to_weave(self, mean_return: float):
+        """Push the rolling mean return as a Weave online eval data point."""
+        try:
+            weave.log({
+                "agent_id": self.agent_id,
+                "step": self.num_timesteps,
+                "mean_return": mean_return,
+            })
+        except Exception:
+            # Weave logging is best-effort — never crash training
+            pass
