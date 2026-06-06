@@ -77,10 +77,33 @@ def init_weave(agent_id: str):
         print(f"[weave] init skipped ({e})")
 
 
+def init_wandb(agent_id: str, lr: float, seed: int):
+    """Start a W&B run for per-step reward/loss charts. No-op if key not set."""
+    if os.environ.get("WANDB_DISABLED") or not os.environ.get("WANDB_API_KEY"):
+        return None
+    project = os.environ.get("WEAVE_PROJECT", "autorl")
+    try:
+        import wandb
+        run = wandb.init(
+            project=project,
+            name=agent_id,
+            group="Countdown-GRPO",
+            config={"algo": "GRPO", "env": "Countdown", "lr": lr, "seed": seed},
+            reinit="finish_previous",
+        )
+        print(f"[wandb] run started: {run.url}")
+        return run
+    except Exception as e:
+        print(f"[wandb] init skipped ({e})")
+        return None
+
+
 @weave.op(name="GRPO_Countdown_Training")
 def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir):
     """Time-budgeted GRPO training on Countdown. Traced as a Weave op."""
     os.makedirs(f"{results_dir}/{agent_id}", exist_ok=True)
+
+    wandb_run = init_wandb(agent_id, lr, seed)
 
     hb = HeartbeatWriter(agent_id, results_dir)
     hb.start()
@@ -124,7 +147,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         output_dir=f"{results_dir}/{agent_id}",
         logging_steps=1,
         save_steps=9999,  # don't auto-save; we save manually at the end
-        report_to="none",
+        report_to="wandb" if os.environ.get("WANDB_API_KEY") else "none",
     )
 
     trainer = GRPOTrainer(
@@ -200,6 +223,12 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     }
     with open(f"{results_dir}/{agent_id}/eval_result.json", "w") as f:
         json.dump(result, f, indent=2)
+
+    if wandb_run is not None:
+        try:
+            wandb_run.finish()
+        except Exception:
+            pass
 
     hb.stop("completed")
     print(f"[{agent_id}] done: mean_return={mean_return:.3f}")
