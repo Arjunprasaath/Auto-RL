@@ -19,6 +19,8 @@ python-dotenv
 # --- Local RL training (MuJoCo: PPO / SAC / A2C on Mac) ---
 # Versions below are verified working on macOS arm64 + Python 3.12.
 # gymnasium>=1.0 is required for the *-v5 envs (HalfCheetah-v5, Hopper-v5).
+# wandb enables per-step training charts (synced from SB3 TensorBoard scalars).
+wandb
 stable-baselines3[extra]>=2.8.0
 gymnasium[mujoco]>=1.2.0
 mujoco>=3.9.0
