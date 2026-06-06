@@ -44,6 +44,7 @@ htmlcov/
 
 # AutoRL specific
 autorl/results/
+autorl/runs/
 autorl/spawn_plan.json
 autorl/rankings.json
 autorl/run_report.md

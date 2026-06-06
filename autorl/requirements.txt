@@ -6,8 +6,9 @@
 # For exact, reproducible pins from a working environment, run:
 #     pip freeze > requirements.lock.txt
 
-# --- Core orchestration (Person A: orchestrator, sentinel, evaluator, UI bridge) ---
+# --- Core orchestration (orchestrator, sentinel, evaluator, UI bridge) ---
 weave
+openai-agents
 anthropic
 pydantic>=2.0
 fastapi

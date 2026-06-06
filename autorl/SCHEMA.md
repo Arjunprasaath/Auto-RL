@@ -196,16 +196,29 @@ class NudgeConfig(BaseModel):
 
 ## Directory Structure
 
+Each race gets its own timestamped **run directory** under `runs/`, which
+co-locates the spawn plan and all per-agent outputs so re-running never
+overwrites a previous run. The Orchestrator mints the run dir and threads it to
+training scripts via `--results-dir`.
+
 ```
 autorl/
-├── spawn_plan.json              # Written by Orchestrator
-└── results/
-    ├── agent_1/
-    │   ├── heartbeat.json       # Updated every 60s
-    │   ├── eval_result.json     # Written on completion
-    │   ├── nudge.json           # Written by Sentinel (if needed)
-    │   └── checkpoints/         # Model checkpoints
-    ├── agent_2/
-    │   └── ...
-    └── ...
+└── runs/
+    ├── latest -> 2026-06-06T13-41-02   # symlink to most recent run
+    └── 2026-06-06T13-41-02/
+        ├── spawn_plan.json             # Written by Orchestrator
+        ├── rankings.json               # Written by Evaluator
+        ├── run_report.md               # Written by Reporter
+        ├── agent_1/
+        │   ├── heartbeat.json          # Updated every 60s
+        │   ├── eval_result.json        # Written on completion
+        │   ├── nudge.json              # Written by Sentinel (if needed)
+        │   └── model.zip               # Model checkpoint
+        ├── agent_2/
+        │   └── ...
+        └── ...
 ```
+
+> Note: training scripts take `--results-dir`, so paths like
+> `heartbeat.json` / `eval_result.json` resolve to `<run_dir>/<agent_id>/...`.
+> Their relative layout within an agent folder is unchanged.
