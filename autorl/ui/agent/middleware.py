@@ -4,6 +4,7 @@ Endpoints consumed by the Next.js CopilotKit runtime (via server-side actions):
   POST /api/plan          → generate spawn plan from user task
   POST /api/run           → start swarm (non-blocking, returns run_dir)
   GET  /api/status/{run}  → poll live heartbeats for all agents
+  GET  /api/stream/{run}  → SSE stream of heartbeats (preferred over polling)
   GET  /api/results/{run} → eval_result.json + sentinel_log.json when done
 
 Run with:
@@ -22,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -37,6 +38,9 @@ load_dotenv(_PKG_ROOT / ".env")
 import weave
 from orchestrator.orchestrator_agent import SpawnPlanEntry, create_run_dir, create_spawn_plan
 from orchestrator.swarm_runner import run_swarm
+from evaluator.evaluator_agent import evaluate_results
+from evaluator.reporter import generate_report
+from coordination.redis_coordinator import coordinator as _coord
 
 app = FastAPI(title="AutoRL Backend", version="0.1.0")
 
@@ -56,9 +60,24 @@ if os.environ.get("WANDB_API_KEY") and not os.environ.get("WEAVE_DISABLED"):
     except Exception as _e:
         print(f"[backend] weave init skipped ({_e})")
 
-# ── In-memory run registry ────────────────────────────────────────────────────
+# ── In-memory run registry (augmented by Redis for cross-restart persistence) ─
 
 _runs: dict[str, dict[str, Any]] = {}  # run_name → {plan, task, status, results}
+
+
+def _save_run(run_name: str) -> None:
+    """Persist run state to Redis so it survives backend restarts."""
+    state = _runs.get(run_name)
+    if state:
+        _coord.set_run_state(run_name, state)
+
+
+def _load_run(run_name: str) -> dict[str, Any] | None:
+    """Recover run state from Redis, then fall back to disk snapshot."""
+    state = _coord.get_run_state(run_name)
+    if state:
+        return state
+    return _disk_run_snapshot(run_name)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -211,6 +230,7 @@ async def generate_plan(req: PlanRequest) -> dict:
         "status": "pending_approval",
         "results": [],
     }
+    _save_run(run_name)
 
     return {
         "run_dir": run_dir,
@@ -239,16 +259,31 @@ async def start_run(req: RunRequest) -> dict:
         }
     else:
         _runs[run_name]["status"] = "running"
+    _save_run(run_name)
 
     async def _run_and_store() -> None:
         try:
             results = await run_swarm(plan, req.run_dir)
             _runs[run_name]["results"] = [r.model_dump() for r in results]
+            # Run LLM evaluator so the UI gets rankings, not just raw results
+            try:
+                rankings = await evaluate_results(results, req.run_dir)
+                _runs[run_name]["rankings"] = rankings
+            except Exception as eval_err:
+                print(f"[backend] evaluator failed (non-fatal): {eval_err}")
+                _runs[run_name]["rankings"] = {}
+            # Generate run_report.md (fixes sentinel_log path + writes W&B summary)
+            try:
+                generate_report(req.run_dir)
+            except Exception as rep_err:
+                print(f"[backend] reporter failed (non-fatal): {rep_err}")
             _runs[run_name]["status"] = "completed"
         except Exception as e:
             print(f"[backend] swarm failed: {e}")
             _runs[run_name]["status"] = "failed"
             _runs[run_name]["error"] = str(e)
+        finally:
+            _save_run(run_name)
 
     asyncio.create_task(_run_and_store())
 
@@ -264,14 +299,24 @@ def get_status(run_name: str) -> dict:
     run = _runs.get(run_name)
     disk = _disk_run_snapshot(run_name)
     if not run and not disk:
-        raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
+        # Also check Redis
+        redis_state = _coord.get_run_state(run_name)
+        if redis_state:
+            _runs[run_name] = redis_state
+            run = _runs[run_name]
+        else:
+            raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
 
     if disk and (not run or disk["status"] == "completed"):
         _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log")}
         run = _runs[run_name]
 
     run_dir = run["run_dir"]
-    heartbeats = disk["heartbeats"] if disk else _read_heartbeats(run_dir)
+    # Prefer Redis heartbeats (lower latency), fall back to file reads
+    redis_hbs = _coord.get_all_heartbeats(run_name)
+    heartbeats = list(redis_hbs.values()) if redis_hbs else (
+        disk["heartbeats"] if disk else _read_heartbeats(run_dir)
+    )
     sentinel_log = disk["sentinel_log"] if disk else _read_sentinel_log(run_dir)
 
     return {
@@ -281,6 +326,32 @@ def get_status(run_name: str) -> dict:
         "heartbeats": heartbeats,
         "sentinel_log": sentinel_log,
     }
+
+
+@app.get("/api/stream/{run_name}")
+async def stream_run(run_name: str, request: Request):
+    """Server-Sent Events stream of live heartbeats for the given run.
+
+    The frontend connects once and receives heartbeat updates as they are
+    published by training scripts via Redis pub/sub.  Falls back gracefully
+    when Redis is unavailable (the client should then use polling instead).
+    """
+    from sse_starlette.sse import EventSourceResponse
+
+    async def generator():
+        # Send a connected ping immediately so the client knows we're live
+        yield {"event": "connected", "data": json.dumps({"run_name": run_name})}
+
+        async for event in _coord.subscribe_heartbeats(run_name):
+            if await request.is_disconnected():
+                break
+            if event.get("_no_redis"):
+                # Signal client to fall back to polling
+                yield {"event": "no_redis", "data": "{}"}
+                return
+            yield {"event": "heartbeat", "data": json.dumps(event)}
+
+    return EventSourceResponse(generator())
 
 
 @app.get("/api/results/{run_name}")
@@ -308,6 +379,7 @@ def get_results(run_name: str) -> dict:
         "status": run["status"],
         "results": results,
         "best": best,
+        "rankings": run.get("rankings", {}),
         "sentinel_log": sentinel_log,
     }
 

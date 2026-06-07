@@ -21,7 +21,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from training.callbacks.heartbeat_writer import HeartbeatWriter
 from training.callbacks.weave_callback import WeaveLogCallback
 from training.env_utils import make_env, resolve_policy
-from training.wandb_setup import finish_wandb_run, start_wandb_run
+from training.wandb_setup import finish_wandb_run, log_model_artifact, start_wandb_run
 
 ALGO = "PPO"
 CHUNK = 5000
@@ -90,6 +90,11 @@ def main():
     if mean_r > best_reward:
         model.save(ckpt)
 
+    log_model_artifact(run, ckpt, a.agent_id, {
+        "algo": ALGO, "env": a.env_id, "lr": a.lr, "seed": a.seed,
+        "mean_return": float(mean_r), "steps_trained": steps,
+    })
+
     with open(f"{a.results_dir}/{a.agent_id}/eval_result.json", "w") as f:
         json.dump({
             "agent_id": a.agent_id, "algo": ALGO, "env": a.env_id, "status": "completed",
@@ -99,7 +104,7 @@ def main():
         }, f)
 
     hb.stop("completed")
-    finish_wandb_run(run)
+    finish_wandb_run(run, mean_return=float(mean_r), std_return=float(std_r), checkpoint=ckpt)
     print(f"[{a.agent_id}] done: mean_return={mean_r:.1f} ±{std_r:.1f}")
 
 

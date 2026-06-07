@@ -27,6 +27,8 @@ interface SentinelEntry {
   timestamp: string; agent_id: string; failure_reason: string;
   failed_hparams: Record<string, unknown>;
   llm_suggested_hparams: Record<string, unknown>; outcome: string;
+  doctor_stderr?: string;  // set when failure_reason === "environment_setup_error"
+  rationale?: string;
 }
 interface EvalResult {
   agent_id: string; algo: string; env: string; status: string;
@@ -388,7 +390,15 @@ function LiveAgentCard({
         <span className={`text-xs shrink-0 ${fmeta.color}`}>{fmeta.icon} {fmeta.label}</span>
       </div>
 
-      {latestIntervention && currentSeg > 0 && (
+      {latestIntervention && latestIntervention.failure_reason === "environment_setup_error" && (
+        <div className="bg-cyan-950/40 border border-cyan-800/40 rounded-lg px-3 py-2 text-xs">
+          <p className="text-cyan-400 font-semibold mb-1">🔧 Env Doctor {latestIntervention.outcome === "fixed_retrying" ? "fixed & retried" : "— fix failed"}</p>
+          {(latestIntervention.llm_suggested_hparams?.fix_commands as string[] | undefined)?.map((c, i) => (
+            <p key={i} className="font-mono text-gray-300">$ {c}</p>
+          ))}
+        </div>
+      )}
+      {latestIntervention && currentSeg > 0 && latestIntervention.failure_reason !== "environment_setup_error" && (
         <div className="bg-yellow-950/40 border border-yellow-800/40 rounded-lg px-3 py-2 text-xs">
           <p className="text-yellow-400 font-semibold mb-1">GPT config (restart #{currentSeg})</p>
           <p className="font-mono text-gray-300">
@@ -596,7 +606,41 @@ function Leaderboard({
 // ── Sentinel banner ───────────────────────────────────────────────────────────
 
 function SentinelBanner({ entry }: { entry: SentinelEntry }) {
-  const isKilled = entry.outcome === "killed_permanently";
+  const isDoctor  = entry.failure_reason === "environment_setup_error";
+  const isKilled  = entry.outcome === "killed_permanently";
+  const fixOk     = entry.outcome === "fixed_retrying";
+  const fixFailed = entry.outcome === "fix_failed";
+
+  if (isDoctor) {
+    const cmds: string[] = (entry.llm_suggested_hparams?.fix_commands as string[]) ?? [];
+    return (
+      <div className={`flex items-start gap-3 rounded-xl p-3 border text-sm
+        ${fixOk ? "bg-cyan-950 border-cyan-700" : "bg-orange-950 border-orange-700"}`}>
+        <span className="text-lg mt-0.5">{fixOk ? "🔧" : "💊"}</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className={`font-bold text-xs ${fixOk ? "text-cyan-300" : "text-orange-300"}`}>
+              Env Doctor
+            </span>
+            <span className="font-mono text-xs text-gray-400">{entry.agent_id}</span>
+            <span className="text-xs text-gray-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+          </div>
+          {cmds.length > 0 && (
+            <div className="bg-black/30 rounded-lg p-2 font-mono text-xs space-y-1">
+              {cmds.map((c, i) => (
+                <p key={i} className="text-cyan-300">$ {c}</p>
+              ))}
+            </div>
+          )}
+          {entry.rationale && <p className="text-xs text-gray-400 mt-1 italic">{entry.rationale}</p>}
+          <p className={`text-xs mt-1 font-semibold ${fixOk ? "text-cyan-400" : fixFailed ? "text-red-400" : "text-orange-400"}`}>
+            → {fixOk ? "fixed — agent retried" : fixFailed ? "fix failed" : entry.outcome}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`flex items-start gap-3 rounded-xl p-3 border text-sm
       ${isKilled ? "bg-red-950 border-red-700" : "bg-amber-950 border-amber-700"}`}>
@@ -614,7 +658,7 @@ function SentinelBanner({ entry }: { entry: SentinelEntry }) {
           )}
         </div>
         <p className={`text-xs mt-1 font-semibold
-          ${entry.outcome === "completed" ? "text-green-400" : entry.outcome === "killed_permanently" ? "text-red-400" : "text-yellow-400"}`}>
+          ${entry.outcome === "completed" ? "text-green-400" : isKilled ? "text-red-400" : "text-yellow-400"}`}>
           → {entry.outcome}
         </p>
       </div>
@@ -775,9 +819,130 @@ export default function HomePage() {
 
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sseRef            = useRef<EventSource | null>(null);
   const textareaRef       = useRef<HTMLTextAreaElement>(null);
 
-  // ── Polling ──────────────────────────────────────────────────────────────────
+  // ── Shared status handler (used by both SSE and polling) ─────────────────────
+
+  const handleStatusData = useCallback((data: {
+    status?: string;
+    heartbeats?: Heartbeat[];
+    sentinel_log?: SentinelEntry[];
+    plan?: SpawnEntry[];
+  }, name: string) => {
+    const hbs: Heartbeat[]        = data.heartbeats   ?? [];
+    const slog: SentinelEntry[]   = data.sentinel_log ?? [];
+    const serverPlan: SpawnEntry[] = data.plan        ?? [];
+    setHeartbeats(hbs);
+    setSentinel(slog);
+    setPlan(prev => serverPlan.length > prev.length ? serverPlan : prev);
+
+    const sentByAgent: Record<string, number> = {};
+    for (const e of slog) sentByAgent[e.agent_id] = (sentByAgent[e.agent_id] ?? 0) + 1;
+
+    const newAnimStates: Record<string, AnimState> = {};
+    for (const [agentId, cnt] of Object.entries(sentByAgent)) {
+      const prev = prevSentinelCount.current[agentId] ?? 0;
+      if (cnt > prev) {
+        newAnimStates[agentId] = "vanish";
+        setTimeout(() => {
+          setAnimStates(a => ({ ...a, [agentId]: "appear" }));
+          setTimeout(() => setAnimStates(a => ({ ...a, [agentId]: "idle" })), 600);
+        }, 600);
+      }
+    }
+    prevSentinelCount.current = sentByAgent;
+    if (Object.keys(newAnimStates).length > 0) setAnimStates(a => ({ ...a, ...newAnimStates }));
+
+    setHistory(prev => {
+      const next = { ...prev };
+      for (const hb of hbs) {
+        const seg = sentByAgent[hb.agent_id] ?? 0;
+        const pts = next[hb.agent_id] ?? [];
+        const last = pts.at(-1);
+        if (!last || last.steps !== hb.steps_completed) {
+          next[hb.agent_id] = [...pts, { steps: hb.steps_completed, reward: hb.current_reward, seg }];
+        }
+      }
+      return next;
+    });
+
+    if (data.status === "completed" || data.status === "failed") {
+      stopLive();
+      fetch(`${BACKEND}/api/results/${name}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(rData => {
+          if (rData) {
+            setResults(rData.results ?? []);
+            setBest(rData.best ?? null);
+          }
+          setPhase("done");
+        })
+        .catch(() => setPhase("done"));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stopLive = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    if (sseRef.current)  { sseRef.current.close(); sseRef.current = null; }
+  }, []);
+
+  // ── SSE connection (preferred) ────────────────────────────────────────────────
+
+  const startSSE = useCallback((name: string) => {
+    stopLive();
+    // Fetch current snapshot immediately so the UI isn't blank while SSE connects
+    fetch(`${BACKEND}/api/status/${name}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) handleStatusData(data, name); })
+      .catch(() => {});
+
+    const es = new EventSource(`${BACKEND}/api/stream/${name}`);
+    sseRef.current = es;
+
+    es.addEventListener("heartbeat", (e: MessageEvent) => {
+      try {
+        const hb: Heartbeat = JSON.parse(e.data);
+        setHeartbeats(prev => {
+          const idx = prev.findIndex(h => h.agent_id === hb.agent_id);
+          return idx >= 0
+            ? prev.map((h, i) => i === idx ? hb : h)
+            : [...prev, hb];
+        });
+        setHistory(prev => {
+          const pts = prev[hb.agent_id] ?? [];
+          const last = pts.at(-1);
+          if (!last || last.steps !== hb.steps_completed) {
+            return { ...prev, [hb.agent_id]: [...pts, { steps: hb.steps_completed, reward: hb.current_reward, seg: 0 }] };
+          }
+          return prev;
+        });
+        // Periodically refresh full status to catch sentinel + completion
+        if (Math.random() < 0.1) {
+          fetch(`${BACKEND}/api/status/${name}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data) handleStatusData(data, name); })
+            .catch(() => {});
+        }
+      } catch { /* ignore */ }
+    });
+
+    es.addEventListener("no_redis", () => {
+      es.close();
+      sseRef.current = null;
+      startPolling(name);
+    });
+
+    es.onerror = () => {
+      es.close();
+      sseRef.current = null;
+      startPolling(name);   // graceful fallback to HTTP polling
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handleStatusData, stopLive]);
+
+  // ── Polling fallback ──────────────────────────────────────────────────────────
 
   const startPolling = useCallback((name: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -785,60 +950,16 @@ export default function HomePage() {
       try {
         const res = await fetch(`${BACKEND}/api/status/${name}`);
         if (!res.ok) return;
-        const data = await res.json();
-        const hbs: Heartbeat[]        = data.heartbeats   ?? [];
-        const slog: SentinelEntry[]   = data.sentinel_log ?? [];
-        const serverPlan: SpawnEntry[] = data.plan        ?? [];
-        setHeartbeats(hbs);
-        setSentinel(slog);
-        // Sync plan from server in case the UI missed agents (e.g. after server restart)
-        setPlan(prev => serverPlan.length > prev.length ? serverPlan : prev);
-
-        const sentByAgent: Record<string, number> = {};
-        for (const e of slog) sentByAgent[e.agent_id] = (sentByAgent[e.agent_id] ?? 0) + 1;
-
-        const newAnimStates: Record<string, AnimState> = {};
-        for (const [agentId, cnt] of Object.entries(sentByAgent)) {
-          const prev = prevSentinelCount.current[agentId] ?? 0;
-          if (cnt > prev) {
-            newAnimStates[agentId] = "vanish";
-            setTimeout(() => {
-              setAnimStates(a => ({ ...a, [agentId]: "appear" }));
-              setTimeout(() => setAnimStates(a => ({ ...a, [agentId]: "idle" })), 600);
-            }, 600);
-          }
-        }
-        prevSentinelCount.current = sentByAgent;
-        if (Object.keys(newAnimStates).length > 0) setAnimStates(a => ({ ...a, ...newAnimStates }));
-
-        setHistory(prev => {
-          const next = { ...prev };
-          for (const hb of hbs) {
-            const seg = sentByAgent[hb.agent_id] ?? 0;
-            const pts = next[hb.agent_id] ?? [];
-            const last = pts.at(-1);
-            if (!last || last.steps !== hb.steps_completed) {
-              next[hb.agent_id] = [...pts, { steps: hb.steps_completed, reward: hb.current_reward, seg }];
-            }
-          }
-          return next;
-        });
-
-        if (data.status === "completed" || data.status === "failed") {
-          clearInterval(pollRef.current!);
-          const rRes = await fetch(`${BACKEND}/api/results/${name}`);
-          if (rRes.ok) {
-            const rData = await rRes.json();
-            setResults(rData.results ?? []);
-            setBest(rData.best ?? null);
-          }
-          setPhase("done");
-        }
+        handleStatusData(await res.json(), name);
       } catch { /* ignore */ }
     }, POLL_MS);
-  }, []);
+  }, [handleStatusData]);
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  const startLive = useCallback((name: string) => {
+    startSSE(name);
+  }, [startSSE]);
+
+  useEffect(() => () => { stopLive(); }, [stopLive]);
 
   // ── Persist active run to localStorage so UI survives refresh ────────────────
 
@@ -875,12 +996,12 @@ export default function HomePage() {
         setTask(savedTask ?? "");
         setPlan(savedPlan);
         setPhase("racing");
-        startPolling(savedName);
+        startLive(savedName);
       }
     } catch {
       localStorage.removeItem("autorl_active_run");
     }
-  }, [startPolling]);
+  }, [startLive]);
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -907,7 +1028,7 @@ export default function HomePage() {
         body: JSON.stringify({ task, run_dir: runDir, plan }),
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      setPhase("racing"); startPolling(runName);
+      setPhase("racing"); startLive(runName);
     } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); setPhase("error"); }
   };
 
@@ -959,7 +1080,7 @@ export default function HomePage() {
   };
 
   const handleReset = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
+    stopLive();
     localStorage.removeItem("autorl_active_run");
     setPhase("idle"); setTask(""); setPlan([]); setRunName(""); setRunDir("");
     setHeartbeats([]); setSentinel([]); setResults([]); setBest(null); setErrorMsg("");

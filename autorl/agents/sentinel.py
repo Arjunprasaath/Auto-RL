@@ -1,6 +1,8 @@
 """Doom Loop Sentinel — LLM-based agent (Phase 3.1).
 
-Detection is rule-based (read heartbeat.json every 30 s — fast and reliable).
+Detection is rule-based. With Redis, heartbeats trigger _check_all() immediately
+via pub/sub (NaN loss detected in seconds, not up to 30 s). Without Redis the
+sentinel falls back to polling heartbeat.json every CHECK_INTERVAL_S seconds.
 Intervention is LLM-driven: when a failure is detected the Sentinel calls GPT
 with the full failure context + spawn_plan + history of prior interventions and
 asks it to suggest a new hyperparameter configuration. That config is then
@@ -126,15 +128,44 @@ def _append_log(log_path: str, entry: dict) -> None:
     with open(tmp, "w") as f:
         json.dump(log, f, indent=2)
     os.replace(tmp, log_path)
+    # Push intervention summary to W&B run so the dashboard reflects it
+    _update_wandb_sentinel_summary(entry)
 
 
 def _write_nudge(results_dir: str, agent_id: str, hparams: dict) -> None:
+    run_id = os.path.basename(results_dir)
+    # Redis-first: push nudge so the training script can atomically pop it
+    try:
+        from coordination.redis_coordinator import coordinator
+        coordinator.push_nudge(run_id, agent_id, hparams)
+        print(f"[sentinel] nudged {agent_id} via Redis → {hparams}")
+    except Exception:  # noqa: BLE001
+        pass
+    # File fallback: always write so scripts without Redis still get the nudge
     nudge_path = os.path.join(results_dir, agent_id, "nudge.json")
     tmp = nudge_path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(hparams, f)
     os.replace(tmp, nudge_path)
-    print(f"[sentinel] nudged {agent_id} → {hparams}")
+    print(f"[sentinel] nudged {agent_id} via file → {hparams}")
+
+
+def _update_wandb_sentinel_summary(entry: dict) -> None:
+    """Push intervention counts and last failure reason to the active W&B run summary."""
+    try:
+        import wandb
+        if wandb.run is None:
+            return
+        agent_id = entry.get("agent_id", "unknown")
+        reason   = entry.get("failure_reason", "unknown")
+        key_n    = f"sentinel/{agent_id}/interventions"
+        key_r    = f"sentinel/{agent_id}/last_reason"
+        key_o    = f"sentinel/{agent_id}/last_outcome"
+        wandb.run.summary[key_n] = int(wandb.run.summary.get(key_n) or 0) + 1
+        wandb.run.summary[key_r] = reason
+        wandb.run.summary[key_o] = entry.get("outcome", "")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ─── LLM call ────────────────────────────────────────────────────────────────
@@ -357,15 +388,64 @@ async def run_sentinel(
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
+    # Redis wakeup: a background task subscribes to the run's heartbeat channel
+    # and sets this event whenever any agent publishes a heartbeat.  When fired,
+    # the sentinel runs _check_all() immediately instead of waiting up to 30 s.
+    # Without Redis the event is never set and the sentinel falls back to the
+    # existing CHECK_INTERVAL_S poll cadence — behaviour is identical.
+    _redis_wakeup = asyncio.Event()
+    run_id = os.path.basename(results_dir)
+
+    async def _redis_subscriber() -> None:
+        """Listen on the Redis heartbeat channel and wake the sentinel on each message."""
+        try:
+            from coordination.redis_coordinator import coordinator as _coord
+            import redis.asyncio as _aredis
+
+            redis_url = os.environ.get("REDIS_URL")
+            if not redis_url:
+                return
+
+            r = _aredis.from_url(redis_url, decode_responses=True,
+                                  socket_connect_timeout=3, socket_timeout=3)
+            channel = f"autorl:heartbeat:{run_id}"
+            pubsub  = r.pubsub()
+            await pubsub.subscribe(channel)
+            print(f"[sentinel] Redis subscriber active on {channel}")
+
+            async for msg in pubsub.listen():
+                if stop_event and stop_event.is_set():
+                    break
+                if msg and msg.get("type") == "message":
+                    _redis_wakeup.set()   # wake the main loop immediately
+        except Exception as exc:  # noqa: BLE001
+            print(f"[sentinel] Redis subscriber unavailable ({exc}) — using file poll only")
+
+    asyncio.create_task(_redis_subscriber())
+
     print("[sentinel] starting main loop")
     while not (stop_event and stop_event.is_set()):
         await _check_all()
+        # Wait for whichever comes first: a Redis heartbeat event, the 30 s
+        # timeout, or the stop signal.  All three paths are safe to handle.
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=CHECK_INTERVAL_S)
+            done, _ = await asyncio.wait(
+                [
+                    asyncio.create_task(stop_event.wait()),
+                    asyncio.create_task(_redis_wakeup.wait()),
+                ],
+                timeout=CHECK_INTERVAL_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except Exception:  # noqa: BLE001
+            done = set()
+
+        if stop_event and stop_event.is_set():
             print("[sentinel] stop_event was set, breaking loop")
             break
-        except asyncio.TimeoutError:
-            pass
+
+        # Reset the wakeup so the next heartbeat can fire it again
+        _redis_wakeup.clear()
 
     # Final sweep: catch anomalies written just before the swarm shuts down.
     print("[sentinel] doing final sweep")

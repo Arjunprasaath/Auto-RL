@@ -16,8 +16,6 @@ import json
 import os
 import sys
 
-import weave
-
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
@@ -109,14 +107,34 @@ async def run_training_agent(
             f"[{entry.id}] launch (device={resolve_sb3_device()}): "
             f"{' '.join(cmd[1:])}"
         )
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=_PKG_ROOT, env=subprocess_env()
-        )
-        PROCESSES[entry.id] = proc
-        try:
-            code = await proc.wait()
-        finally:
-            PROCESSES.pop(entry.id, None)
+        async def _launch(retry: bool = False) -> tuple[int, str]:
+            """Start the cmd, capture stderr for the doctor, return (exit_code, stderr)."""
+            label = f"{entry.id}{'[retry]' if retry else ''}"
+            p = await asyncio.create_subprocess_exec(
+                *cmd, cwd=_PKG_ROOT, env=subprocess_env(),
+                stderr=asyncio.subprocess.PIPE,  # capture for doctor; stdout stays inherited
+            )
+            PROCESSES[entry.id] = p
+            try:
+                _, stderr_bytes = await p.communicate()
+                code = p.returncode or 0
+            finally:
+                PROCESSES.pop(entry.id, None)
+            stderr_text = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+            # Echo stderr to server console on failure (was swallowed by PIPE)
+            if code != 0 and stderr_text.strip():
+                print(f"[{label}] stderr tail:\n{stderr_text[-1500:]}")
+            return code, stderr_text
+
+        code, stderr_text = await _launch()
+
+        if code != 0 and stderr_text:
+            from agents.env_doctor_agent import diagnose_and_fix
+            result = diagnose_and_fix(stderr_text, entry.id, results_dir)
+            if result.fixed:
+                print(f"[{entry.id}] doctor applied fix — retrying")
+                code, _ = await _launch(retry=True)
+
         if code != 0:
             _write_failed(entry, results_dir)
         print(f"[{entry.id}] exit {code}")

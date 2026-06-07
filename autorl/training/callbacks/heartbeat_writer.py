@@ -23,12 +23,24 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Coordinator is imported lazily to avoid circular imports and to keep the
+# heartbeat writer usable even when the coordination package is not on sys.path.
+def _get_coordinator():
+    try:
+        from coordination.redis_coordinator import coordinator
+        return coordinator
+    except Exception:
+        return None
+
 
 class HeartbeatWriter:
     def __init__(self, agent_id: str, results_dir: str = "./results"):
         self.agent_id = agent_id
         self.dir = Path(results_dir) / agent_id
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir = results_dir
+        # run_id is the name of the run directory (timestamp-based folder name)
+        self.run_id = Path(results_dir).name
 
         self.hb_path = self.dir / "heartbeat.json"
         self.nudge_path = self.dir / "nudge.json"
@@ -77,8 +89,8 @@ class HeartbeatWriter:
 
     def check_nudge(self) -> dict | None:
         """
-        Check if the Sentinel has written a nudge.json with new hyperparameters.
-        If found, reads it, deletes it, and returns the hparams dict.
+        Check if the Sentinel has written a nudge with new hyperparameters.
+        Checks Redis first (atomic pop), then falls back to nudge.json file.
         Returns None if no nudge is pending.
 
         Call this in the training loop on every iteration:
@@ -87,12 +99,21 @@ class HeartbeatWriter:
                 new_lr = nudge.get("lr", current_lr)
                 optimizer.param_groups[0]["lr"] = new_lr
         """
+        # Redis-first: atomic get-and-delete
+        coord = _get_coordinator()
+        if coord is not None:
+            nudge = coord.pop_nudge(self.run_id, self.agent_id)
+            if nudge is not None:
+                print(f"[{self.agent_id}] Nudge received (Redis): {nudge}")
+                return nudge
+
+        # File fallback
         if self.nudge_path.exists():
             try:
                 with open(self.nudge_path) as f:
                     nudge = json.load(f)
                 self.nudge_path.unlink()
-                print(f"[{self.agent_id}] Nudge received: {nudge}")
+                print(f"[{self.agent_id}] Nudge received (file): {nudge}")
                 return nudge
             except Exception as e:
                 print(f"[{self.agent_id}] Failed to read nudge: {e}")
@@ -105,7 +126,7 @@ class HeartbeatWriter:
             self._stop.wait(5)
 
     def _write(self):
-        """Write the current state to heartbeat.json atomically."""
+        """Write the current state to heartbeat.json atomically, and publish to Redis."""
         with self._lock:
             data = {
                 "agent_id": self.agent_id,
@@ -122,3 +143,8 @@ class HeartbeatWriter:
         with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2)
         os.replace(tmp_path, self.hb_path)
+
+        # Dual-write: publish to Redis pub/sub so the UI SSE stream gets it instantly
+        coord = _get_coordinator()
+        if coord is not None:
+            coord.publish_heartbeat(self.run_id, self.agent_id, data)

@@ -14,6 +14,14 @@ import gymnasium
 from gymnasium import spaces
 from gymnasium.wrappers import FlattenObservation
 
+# ale-py ≥ 0.9 no longer auto-registers via entry points in all environments.
+# Explicitly register when available so ALE/* envs are always discoverable.
+try:
+    import ale_py
+    gymnasium.register_envs(ale_py)
+except Exception:
+    pass
+
 
 def make_env(env_id: str, render_mode: str | None = None) -> gymnasium.Env:
     """Create a Gymnasium env with any required compatibility wrappers applied.

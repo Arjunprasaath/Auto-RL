@@ -52,9 +52,54 @@ def start_wandb_run(agent_id, algo, env_id, lr, seed, results_dir):
     return run, tb_log, WandbCallback(verbose=0)
 
 
-def finish_wandb_run(run) -> None:
+def log_model_artifact(
+    run,
+    checkpoint_path: str,
+    agent_id: str,
+    metadata: dict | None = None,
+) -> None:
+    """Log a model checkpoint as a W&B Artifact for versioning and comparison.
+
+    Safe no-op when run is None (W&B disabled) or the file doesn't exist yet.
+    """
+    if run is None:
+        return
+    import os as _os
+    if not _os.path.exists(checkpoint_path):
+        print(f"[wandb] artifact skipped — checkpoint not found: {checkpoint_path}")
+        return
+    try:
+        import wandb
+        art = wandb.Artifact(
+            name=agent_id,
+            type="model",
+            metadata=metadata or {},
+        )
+        art.add_file(checkpoint_path)
+        run.log_artifact(art)
+        print(f"[wandb] artifact logged: {agent_id} → {checkpoint_path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[wandb] artifact logging failed ({e})")
+
+
+def finish_wandb_run(
+    run,
+    mean_return: float | None = None,
+    std_return: float | None = None,
+    checkpoint: str | None = None,
+) -> None:
+    """Finish the W&B run and write final metrics to the run summary."""
     if run is not None:
         try:
+            summary: dict = {}
+            if mean_return is not None:
+                summary["mean_return"] = mean_return
+            if std_return is not None:
+                summary["std_return"] = std_return
+            if checkpoint:
+                summary["checkpoint"] = checkpoint
+            if summary:
+                run.summary.update(summary)
             run.finish()
         except Exception:  # noqa: BLE001
             pass

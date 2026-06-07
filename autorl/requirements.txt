@@ -13,8 +13,12 @@ anthropic
 pydantic>=2.0
 fastapi
 uvicorn[standard]
+sse-starlette>=2.0  # Server-Sent Events for /api/stream endpoint
 copilotkit          # CopilotKit Python SDK — used by ui/agent/middleware.py
 python-dotenv
+redis>=5.0          # Real-time coordination: pub/sub heartbeats + nudge queues
+pandas
+huggingface_hub
 
 # --- UI: Next.js frontend (Node.js ≥20 required) ---
 # The UI lives in autorl/ui/ and is a separate npm project.
