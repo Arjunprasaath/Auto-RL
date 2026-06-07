@@ -123,7 +123,7 @@ def _run_inference(model, tokenizer, cases: list, agent_id: str, label: str) -> 
             msgs, return_tensors="pt", add_generation_prompt=True
         ).to(model.device)
         with torch.no_grad():
-            out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
+            out = model.generate(inputs, max_new_tokens=128, do_sample=False)
         response = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
         score = evaluate_solution(response, row["target"], row["nums"])
         results.append({
@@ -157,7 +157,9 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, torch_dtype="auto" if device == "auto" else None,
         )
-        if device not in ("auto", "cpu"):
+        if device == "auto" and torch.cuda.is_available():
+            model = model.to("cuda")
+        elif device not in ("auto", "cpu"):
             model = model.to(device)
 
     lora_config = LoraConfig(
@@ -181,7 +183,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     print(f"[{agent_id}] Loading dataset...")
     dataset = load_countdown_dataset(split="train", seed=seed)
     dataset = dataset.shuffle(seed=seed)
-    dataset = dataset.select(range(min(3_000, len(dataset))))  # prevent GRPOTrainer init hang
+    dataset = dataset.select(range(min(1_500, len(dataset))))  # keep init fast; 1500 rows >> steps in budget
 
     def format_row(row):
         return {
@@ -193,7 +195,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
             "numbers": row["nums"],
         }
 
-    formatted = dataset.map(format_row, remove_columns=dataset.column_names)
+    formatted = dataset.map(format_row, remove_columns=dataset.column_names, num_proc=4)
 
     _cuda_ok = torch.cuda.is_available()
     _bf16_ok = _cuda_ok and torch.cuda.is_bf16_supported()
@@ -203,7 +205,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         learning_rate=lr,
         per_device_train_batch_size=_batch_size,
         num_generations=num_generations,
-        max_completion_length=512,
+        max_completion_length=256,
         temperature=temperature,
         seed=seed,
         output_dir=f"{results_dir}/{agent_id}",

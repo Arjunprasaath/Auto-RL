@@ -21,6 +21,8 @@ runpod.api_key = os.environ["RUNPOD_API_KEY"]
 IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 
 GPU_FALLBACK_ORDER = [
+    "NVIDIA H100 80GB HBM3",
+    "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "NVIDIA GeForce RTX 4090",
     "NVIDIA RTX A6000",
     "NVIDIA L40",
