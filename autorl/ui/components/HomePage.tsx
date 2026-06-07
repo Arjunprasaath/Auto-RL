@@ -56,6 +56,29 @@ interface AgentLogEntry {
   timestamp: number;
 }
 
+interface WMRolloutStep {
+  step: number;
+  true_reward: number;
+  pred_reward: number;
+  true_obs: number[];
+  pred_obs: number[];
+  true_done?: number;
+  pred_done?: number;
+  obs_mse_step?: number;
+}
+
+interface WMEval {
+  n_val_samples: number;
+  obs_mse: number;
+  reward_mse: number;
+  reward_mae: number;
+  done_accuracy: number;
+  val_loss: number;
+  obs_dims_plotted: number;
+  one_step_rollout: WMRolloutStep[];
+  open_loop_rollout: WMRolloutStep[];
+}
+
 interface RewardMsg {
   role: "user" | "assistant";
   text: string;
@@ -238,6 +261,109 @@ function MiniChart({
       <text x="2" y="10" fontSize="9" fill="#4b5563">{maxR.toFixed(0)}</text>
       <text x="2" y={H - 2} fontSize="9" fill="#4b5563">{minR.toFixed(0)}</text>
     </svg>
+  );
+}
+
+// ── World-model eval charts (pred vs ground truth on val set) ───────────────
+
+function WMDualLineChart({
+  steps, trueKey, predKey, label, trueColor = "#34d399", predColor = "#f472b6",
+}: {
+  steps: WMRolloutStep[];
+  trueKey: "true_reward" | "true_obs";
+  predKey: "pred_reward" | "pred_obs";
+  label: string;
+  trueColor?: string;
+  predColor?: string;
+  dim?: number;
+}) {
+  const W = 360, H = 80;
+  if (!steps.length) return (
+    <div className="h-[80px] flex items-center justify-center text-xs text-gray-600">No rollout data</div>
+  );
+
+  const getVal = (s: WMRolloutStep, key: typeof trueKey, dim = 0) =>
+    key.endsWith("_obs") ? (s[key as "true_obs"]?.[dim] ?? 0) : (s[key as "true_reward"] ?? 0);
+
+  const dim = 0;
+  const trueVals = steps.map(s => getVal(s, trueKey, dim));
+  const predVals = steps.map(s => getVal(s, predKey, dim));
+  const all = [...trueVals, ...predVals];
+  const minV = Math.min(...all);
+  const maxV = Math.max(...all);
+  const xS = (i: number) => (i / Math.max(steps.length - 1, 1)) * W;
+  const yS = (v: number) => H - 6 - ((v - minV) / (maxV - minV || 1)) * (H - 12);
+
+  const toPath = (vals: number[]) =>
+    vals.map((v, i) => `${i === 0 ? "M" : "L"}${xS(i).toFixed(1)},${yS(v).toFixed(1)}`).join(" ");
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs text-gray-500">{label}</span>
+        <div className="flex gap-3 text-xs">
+          <span style={{ color: trueColor }}>— true</span>
+          <span style={{ color: predColor }}>- - pred</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[80px]" preserveAspectRatio="none">
+        <path d={toPath(trueVals)} fill="none" stroke={trueColor} strokeWidth="1.5" />
+        <path d={toPath(predVals)} fill="none" stroke={predColor} strokeWidth="1.5" strokeDasharray="4 3" />
+      </svg>
+    </div>
+  );
+}
+
+function WMEvalPanel({ eval: wmEval }: { eval: WMEval }) {
+  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  return (
+    <div className="bg-gray-900 border border-teal-700/40 rounded-xl p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-teal-300 uppercase tracking-wider">
+          World Model — Validation Test
+        </span>
+        <span className="text-xs text-gray-500 font-mono">{wmEval.n_val_samples.toLocaleString()} holdout samples</span>
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 text-center">
+        {[
+          { label: "Obs MSE",    value: wmEval.obs_mse.toFixed(4),      good: wmEval.obs_mse < 0.1 },
+          { label: "Reward MAE", value: wmEval.reward_mae.toFixed(4),   good: wmEval.reward_mae < 0.5 },
+          { label: "Done Acc",   value: pct(wmEval.done_accuracy),       good: wmEval.done_accuracy > 0.8 },
+          { label: "Val Loss",   value: wmEval.val_loss.toFixed(4),     good: wmEval.val_loss < 1.0 },
+        ].map(m => (
+          <div key={m.label} className="bg-gray-800/60 rounded-lg py-2 px-1">
+            <p className="text-xs text-gray-600">{m.label}</p>
+            <p className={`font-mono text-sm font-bold ${m.good ? "text-teal-400" : "text-gray-300"}`}>{m.value}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-3">
+        <WMDualLineChart
+          steps={wmEval.one_step_rollout}
+          trueKey="true_reward" predKey="pred_reward"
+          label="One-step reward — true vs predicted (val set)"
+        />
+        <WMDualLineChart
+          steps={wmEval.one_step_rollout}
+          trueKey="true_obs" predKey="pred_obs"
+          label={`Obs dim 0 — one-step prediction`}
+        />
+        {wmEval.open_loop_rollout.length > 0 && (
+          <WMDualLineChart
+            steps={wmEval.open_loop_rollout}
+            trueKey="true_reward" predKey="pred_reward"
+            label="Open-loop rollout — reward drift (pred state feeds forward)"
+            predColor="#fbbf24"
+          />
+        )}
+      </div>
+
+      <p className="text-xs text-gray-600">
+        Tested on 20% holdout split. Open-loop shows compounding error when the model feeds its own predictions.
+      </p>
+    </div>
   );
 }
 
@@ -768,6 +894,7 @@ export default function HomePage() {
 
   // WM trainer live heartbeat (epoch, val_loss, total_epochs)
   const [wmHeartbeat, setWmHeartbeat] = useState<Record<string, number | null>>({});
+  const [wmEval,      setWmEval]      = useState<WMEval | null>(null);
 
   // Reward design chat state
   const [rewardMsgs,    setRewardMsgs]    = useState<RewardMsg[]>([]);
@@ -833,6 +960,7 @@ export default function HomePage() {
         if (data.wm_status) setWmStatus(data.wm_status);
         if (data.agent_log?.length) setAgentLog(data.agent_log);
         if (data.wm_heartbeat) setWmHeartbeat(data.wm_heartbeat);
+        if (data.wm_eval) setWmEval(data.wm_eval);
         // Keep wm_training phase active during RL racing so users see the full pipeline;
         // only regular gym runs transition to "racing".
         if (data.status === "running" || data.status === "racing") {
@@ -847,12 +975,17 @@ export default function HomePage() {
             const rData = await rRes.json();
             setResults(rData.results ?? []);
             setBest(rData.best ?? null);
-            // Auto-render best agent once on completion
+            // Auto-render best RL agent once on completion (never wm_trainer)
             const bestAgent = rData.best;
-            if (bestAgent && !autoRendered.current) {
+            const isRlAgent = bestAgent
+              && bestAgent.agent_id !== "wm_trainer"
+              && bestAgent.algo?.toUpperCase() !== "WORLD_MODEL";
+            if (isRlAgent && !autoRendered.current) {
               autoRendered.current = true;
-              // Small delay so the Done phase renders first
-              setTimeout(() => handleInfer(bestAgent.agent_id, name, rData.plan ?? []), 800);
+              setTimeout(
+                () => handleInfer(bestAgent.agent_id, name, rData.plan ?? []),
+                800,
+              );
             }
           }
           setPhase("done");
@@ -1037,7 +1170,7 @@ export default function HomePage() {
     setHistory({}); setAnimStates({}); setInferring({}); setVideos({}); setVideoModal(null);
     setDatasetMeta(null); setUploadStatus("idle"); setHfInput(""); setWmStatus(null); setAgentLog([]);
     setRewardMsgs([]); setRewardCode(""); setRewardInput(""); setRewardBusy(false); setRewardApplying(false);
-    setWmHeartbeat({});
+    setWmHeartbeat({}); setWmEval(null);
     prevSentinelCount.current = {};
     autoRendered.current = false;
     setTimeout(() => textareaRef.current?.focus(), 50);
@@ -1364,8 +1497,10 @@ export default function HomePage() {
         const totalEpochs = (wmHeartbeat.total_epochs   as number) ?? 200;
         const valLoss     = (wmHeartbeat.loss            as number | null) ?? null;
         const pct         = totalEpochs > 0 ? Math.min(100, (epoch / totalEpochs) * 100) : 0;
-        const isPlanning  = wmStatus === "planning" || (wmStatus !== "training" && wmStatus !== "done" && agentLog.length < 3);
+        const isPlanning  = wmStatus === "planning" || (wmStatus !== "training" && wmStatus !== "done" && wmStatus !== "evaluating" && wmStatus !== "eval_done" && agentLog.length < 3);
         const isTraining  = wmStatus === "training";
+        const isEvaluating = wmStatus === "evaluating";
+        const hasEval     = wmStatus === "eval_done" || !!wmEval;
 
         const AGENT_META: Record<string, { icon: string; label: string; color: string }> = {
           arch_search:   { icon: "🏗️",  label: "Arch Agent",     color: "text-violet-400" },
@@ -1394,6 +1529,10 @@ export default function HomePage() {
                   {best ? "World Model Pipeline Complete"
                    : isPlanning ? "Multi-Agent Planning…"
                    : plan.length > 0 ? "RL Agents Racing in World Model…"
+                   : isEvaluating ? "Testing World Model on Holdout Data…"
+                   : hasEval && !plan.length ? "World Model Validated — Launching RL Agents…"
+                   : isTraining ? "Training World Model…"
+                   : wmStatus === "done" ? "World Model Trained — Running Tests…"
                    : "Training World Model…"}
                 </p>
                 <p className="text-xs text-gray-500">
@@ -1403,7 +1542,13 @@ export default function HomePage() {
                       ? "Agents are deciding architecture, algorithms & hyperparameters"
                       : plan.length > 0
                         ? `${plan.length} algorithms racing inside the learned simulator`
-                        : `Phase 2 of 3 — learning dynamics from ${datasetMeta?.n_samples?.toLocaleString() ?? "?"} transitions`}
+                        : isEvaluating
+                          ? "Evaluating one-step and open-loop predictions on 20% holdout"
+                          : hasEval && wmEval
+                            ? `Val obs MSE ${wmEval.obs_mse.toFixed(4)} · reward MAE ${wmEval.reward_mae.toFixed(4)} · starting PPO/SAC/A2C…`
+                            : isTraining
+                              ? `Phase 2 of 4 — learning dynamics from ${datasetMeta?.n_samples?.toLocaleString() ?? "?"} transitions`
+                              : "Preparing world model pipeline…"}
                 </p>
               </div>
             </div>
@@ -1411,13 +1556,15 @@ export default function HomePage() {
             {/* Phase indicator strip */}
             <div className="flex gap-1 text-xs">
               {[
-                { key: "plan",  label: "1 · Plan",             done: agentLog.length >= 3 || isTraining || plan.length > 0 },
-                { key: "train", label: "2 · Train World Model", done: wmStatus === "done" || plan.length > 0 },
-                { key: "race",  label: "3 · Race RL Agents",    done: !!best },
+                { key: "plan",  label: "1 · Plan",        done: agentLog.length >= 3 || isTraining || hasEval || plan.length > 0 },
+                { key: "train", label: "2 · Train WM",    done: wmStatus === "done" || wmStatus === "evaluating" || hasEval || plan.length > 0 },
+                { key: "test",  label: "3 · Test WM",   done: hasEval || plan.length > 0 },
+                { key: "race",  label: "4 · Race RL",     done: !!best },
               ].map(s => {
                 const active = !s.done && (
-                  (s.key === "plan"  && isPlanning)  ||
-                  (s.key === "train" && isTraining)  ||
+                  (s.key === "plan"  && isPlanning)   ||
+                  (s.key === "train" && isTraining)   ||
+                  (s.key === "test"  && (isEvaluating || (wmStatus === "done" && !hasEval))) ||
                   (s.key === "race"  && plan.length > 0 && !best)
                 );
                 return (
@@ -1479,7 +1626,7 @@ export default function HomePage() {
             )}
 
             {/* WM training progress (shown once training starts) */}
-            {(isTraining || wmStatus === "done") && (
+            {(isTraining || wmStatus === "done" || isEvaluating || hasEval) && (
               <div className="bg-gray-900 border border-teal-800/50 rounded-xl p-4 space-y-3">
                 {/* Header row */}
                 <div className="flex items-center justify-between">
@@ -1487,7 +1634,8 @@ export default function HomePage() {
                     World Model Training
                   </span>
                   <span className="font-mono text-xs text-teal-300">
-                    {wmStatus === "done" ? "✓ done" : `epoch ${epoch} / ${totalEpochs}`}
+                    {isTraining ? `epoch ${epoch} / ${totalEpochs}`
+                      : "✓ trained"}
                   </span>
                 </div>
 
@@ -1495,7 +1643,7 @@ export default function HomePage() {
                 <div className="relative w-full bg-gray-800 rounded-full h-2 overflow-hidden">
                   <div
                     className="h-2 rounded-full bg-gradient-to-r from-teal-600 to-teal-400 transition-all duration-700"
-                    style={{ width: wmStatus === "done" ? "100%" : `${Math.max(pct, 2)}%` }}
+                    style={{ width: isTraining ? `${Math.max(pct, 2)}%` : "100%" }}
                   />
                   {isTraining && pct < 100 && (
                     <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-pulse rounded-full" />
@@ -1511,7 +1659,7 @@ export default function HomePage() {
                   <div>
                     <p className="text-xs text-gray-600">Progress</p>
                     <p className="font-mono text-sm font-bold text-teal-400">
-                      {wmStatus === "done" ? "100%" : epoch > 0 ? `${pct.toFixed(0)}%` : "—"}
+                      {isTraining ? (epoch > 0 ? `${pct.toFixed(0)}%` : "—") : "100%"}
                     </p>
                   </div>
                   <div>
@@ -1534,13 +1682,22 @@ export default function HomePage() {
               </div>
             )}
 
-            {/* Phase 3 — RL agents racing inside the world model */}
+            {/* WM eval results — shown after training, before RL swarm */}
+            {isEvaluating && !wmEval && (
+              <div className="bg-gray-900 border border-teal-800/50 rounded-xl p-4 flex items-center gap-3">
+                <div className="w-5 h-5 rounded-full border-2 border-teal-500 border-t-transparent animate-spin shrink-0" />
+                <p className="text-xs text-gray-400">Running one-step &amp; open-loop evaluation on holdout transitions…</p>
+              </div>
+            )}
+            {wmEval && <WMEvalPanel eval={wmEval} />}
+
+            {/* Phase 4 — RL agents racing inside the world model */}
             {plan.length > 0 && (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 rounded-full border border-violet-500 border-t-transparent animate-spin shrink-0" />
                   <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                    Phase 3 · RL Agents Racing in World Model
+                    Phase 4 · RL Agents Racing in World Model
                   </span>
                 </div>
                 <div className="grid grid-cols-1 gap-2">
@@ -1615,11 +1772,17 @@ export default function HomePage() {
             )}
 
             {/* Pre-race hint when plan not yet available */}
-            {plan.length === 0 && agentLog.length >= 3 && (
-              <p className="text-xs text-gray-600 text-center">
-                Phase 3 will race{" "}
+            {plan.length === 0 && hasEval && (
+              <p className="text-xs text-gray-600 text-center animate-pulse">
+                Launching{" "}
                 {agentLog.find(e => e.agent === "algo_selector")?.decision?.replace("Competing: ", "") ?? "PPO / SAC / A2C"}{" "}
-                inside the world model once training converges.
+                inside the validated world model…
+              </p>
+            )}
+            {plan.length === 0 && !hasEval && agentLog.length >= 3 && wmStatus !== "training" && wmStatus !== "evaluating" && (
+              <p className="text-xs text-gray-600 text-center">
+                Phase 3 will test the world model on holdout data, then race{" "}
+                {agentLog.find(e => e.agent === "algo_selector")?.decision?.replace("Competing: ", "") ?? "PPO / SAC / A2C"}.
               </p>
             )}
 

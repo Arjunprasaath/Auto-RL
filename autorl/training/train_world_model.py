@@ -38,6 +38,8 @@ from training.callbacks.heartbeat_writer import HeartbeatWriter
 from training.world_model_env import WorldModelMLP
 
 AGENT_ID = "wm_trainer"
+SPLIT_SEED = 42
+VAL_FRACTION = 0.2
 
 
 # ── Data preparation ──────────────────────────────────────────────────────────
@@ -114,10 +116,10 @@ def main():
     df = load_from_file(a.dataset_path)
     X, Y_obs, Y_rew, Y_done = build_tensors(df, meta)
 
-    # 80 / 20 train / val split
+    # 80 / 20 train / val split (fixed seed so eval_world_model.py uses same holdout)
     n     = len(X)
-    n_val = max(1, int(n * 0.2))
-    perm  = torch.randperm(n)
+    n_val = max(1, int(n * VAL_FRACTION))
+    perm  = torch.randperm(n, generator=torch.Generator().manual_seed(SPLIT_SEED))
     i_tr, i_val = perm[n_val:], perm[:n_val]
     tr_dl = DataLoader(TensorDataset(X[i_tr], Y_obs[i_tr], Y_rew[i_tr], Y_done[i_tr]),
                        batch_size=a.batch_size, shuffle=True)

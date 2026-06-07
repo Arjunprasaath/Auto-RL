@@ -24,6 +24,7 @@ class WeaveLogCallback(BaseCallback):
         self.agent_id = agent_id
         self.log_freq = log_freq
         self.ep_returns: list[float] = []
+        self.ep_lengths: list[float] = []
 
     def _on_step(self) -> bool:
         # SB3 populates infos with episode stats when an episode ends
@@ -31,6 +32,7 @@ class WeaveLogCallback(BaseCallback):
             if "episode" in info:
                 ep_return = float(info["episode"]["r"])
                 self.ep_returns.append(ep_return)
+                self.ep_lengths.append(float(info["episode"]["l"]))
 
         if self.num_timesteps % self.log_freq == 0 and self.ep_returns:
             window = self.ep_returns[-10:]
@@ -44,6 +46,18 @@ class WeaveLogCallback(BaseCallback):
             self._log_to_weave(mean_r)
 
         return True
+
+    def get_sb3_metrics(self) -> dict:
+        """Read latest SB3 training metrics from the logger (PPO / A2C / SAC)."""
+        if self.logger is None:
+            return {}
+        nv = getattr(self.logger, "name_to_value", {}) or {}
+        out: dict = {}
+        if "train/explained_variance" in nv:
+            out["explained_variance"] = float(nv["train/explained_variance"])
+        if "train/entropy_loss" in nv:
+            out["entropy_loss"] = float(nv["train/entropy_loss"])
+        return out
 
     def _log_to_weave(self, mean_return: float):
         """Push the rolling mean return as a Weave online eval data point."""

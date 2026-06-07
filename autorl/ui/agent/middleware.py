@@ -272,15 +272,26 @@ def get_status(run_name: str) -> dict:
     mem_log = run.get("agent_log", [])
     agent_log = disk_log if len(disk_log) >= len(mem_log) else mem_log
 
+    # World-model eval results (written after training, before RL swarm)
+    wm_eval_path = Path(run_dir) / "wm_trainer" / "wm_eval.json"
+    wm_eval = run.get("wm_eval")
+    if wm_eval is None and wm_eval_path.exists():
+        try:
+            wm_eval = json.loads(wm_eval_path.read_text())
+            run["wm_eval"] = wm_eval
+        except Exception:
+            wm_eval = None
+
     return {
         "run_name":    run_name,
         "status":      run["status"],
-        "wm_status":   run.get("wm_status"),   # "planning" | "training" | "done" | "failed" | None
+        "wm_status":   run.get("wm_status"),   # planning | training | evaluating | eval_done | done | failed
         "plan":        run["plan"],
         "heartbeats":  heartbeats,
-        "wm_heartbeat": wm_heartbeat,          # wm_trainer heartbeat (epoch, val_loss, total_epochs)
+        "wm_heartbeat": wm_heartbeat,
+        "wm_eval":     wm_eval,
         "sentinel_log": sentinel_log,
-        "agent_log":   agent_log,              # multi-agent planner reasoning
+        "agent_log":   agent_log,
     }
 
 
@@ -295,15 +306,21 @@ def get_results(run_name: str) -> dict:
     results = _read_results(run_dir)
     sentinel_log = _read_sentinel_log(run_dir)
 
-    # Pick best by mean_return.
-    completed = [r for r in results if r.get("status") == "completed"]
+    # RL agents only — wm_trainer uses mean_return = −val_loss, not policy return
+    rl_results = [
+        r for r in results
+        if r.get("algo", "").upper() != "WORLD_MODEL"
+        and r.get("agent_id") != "wm_trainer"
+    ]
+    completed = [r for r in rl_results if r.get("status") == "completed"]
     best = max(completed, key=lambda r: r.get("mean_return", -1e9)) if completed else None
 
     return {
         "run_name": run_name,
         "status": run["status"],
-        "results": results,
+        "results": rl_results,
         "best": best,
+        "plan": run.get("plan", []),
         "sentinel_log": sentinel_log,
     }
 
@@ -598,10 +615,12 @@ async def apply_reward_endpoint(req: ApplyRewardRequest) -> dict:
 
 @app.post("/api/world-model-plan")
 async def world_model_plan(req: WMPlanRequest) -> dict:
-    """Start a two-phase world-model pipeline.
+    """Start a world-model pipeline.
 
-    Phase 1 (background): trains the world model on the dataset.
-    Phase 2 (background): runs PPO / SAC / A2C inside the learned simulator.
+    Phase 0: multi-agent planning (architecture, algos, hparams)
+    Phase 1: train world model on dataset
+    Phase 1b: evaluate on 20% holdout — metrics shown in UI
+    Phase 2: race PPO / SAC / A2C inside the learned simulator
 
     Returns immediately with run_name — poll /api/status/{run_name} for progress.
     """
@@ -736,6 +755,34 @@ async def _run_wm_pipeline(
 
     _runs[run_name]["wm_status"] = "done"
     print(f"[backend] wm_pipeline: phase 1 done — checkpoint at {ckpt_path}")
+
+    # ── Phase 1b: evaluate world model on held-out test data ────────────────
+    _runs[run_name]["wm_status"] = "evaluating"
+    print(f"[backend] wm_pipeline: phase 1b — evaluating world model on val set")
+    eval_cmd = [
+        sys.executable, str(_PKG_ROOT / "training" / "eval_world_model.py"),
+        "--checkpoint",   ckpt_path,
+        "--meta-path",    meta_path,
+        "--dataset-path", meta.dataset_path,
+        "--results-dir",  run_dir,
+        "--agent-id",     "wm_trainer",
+    ]
+    eval_proc = await asyncio.create_subprocess_exec(
+        *eval_cmd, cwd=str(_PKG_ROOT),
+        stdout=None, stderr=asyncio.subprocess.PIPE,
+    )
+    _, eval_stderr = await eval_proc.communicate()
+    wm_eval_path = wm_dir / "wm_eval.json"
+    if eval_proc.returncode != 0:
+        err = eval_stderr.decode(errors="replace").strip() if eval_stderr else "unknown error"
+        print(f"[backend] wm_pipeline: wm eval failed:\n{err}")
+        _runs[run_name]["status"]    = "failed"
+        _runs[run_name]["wm_status"] = "failed"
+        return
+    if wm_eval_path.exists():
+        _runs[run_name]["wm_eval"] = json.loads(wm_eval_path.read_text())
+        print(f"[backend] wm_pipeline: eval done — obs_mse={_runs[run_name]['wm_eval'].get('obs_mse', '?'):.4f}")
+    _runs[run_name]["wm_status"] = "eval_done"
 
     # ── Phase 2: SB3 swarm — planner-chosen algos + hparams ─────────────────
     wm_hparams = {"wm_checkpoint": ckpt_path, "wm_meta": meta_path}
