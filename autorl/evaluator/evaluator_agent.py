@@ -59,10 +59,11 @@ class ReturnScorer(weave.Scorer):
     def score(self, output: dict, expected: dict | None = None) -> dict:  # type: ignore[override]
         mean_r = output.get("mean_return", 0.0)
         std_r  = max(output.get("std_return", 1.0), 0.01)
+        valid_statuses = {"completed", "early_stopped", "race_dropout"}
         return {
             "return":    float(mean_r),
             "stability": float(1.0 / std_r),
-            "completed": output.get("status") == "completed",
+            "completed": output.get("status") in valid_statuses,
         }
 
 
@@ -123,11 +124,14 @@ def _rank_group(group_name: str, group: list[EvalResult]) -> list[dict]:
 Consider (in order of importance):
 1. mean_return — higher is better
 2. stability — lower std_return relative to mean is better
-3. status — prefer "completed" > "restarted" > "timed_out" > "failed"
+3. status — prefer "completed" > "early_stopped" > "race_dropout" > "restarted" > "timed_out" > "failed"
 4. sample efficiency — more steps_trained for the same return indicates lower efficiency
 
 Note any Sentinel interventions (status="restarted") — a restarted agent that
 ultimately completes is a success story, not a failure.
+"early_stopped" means training stagnated but evaluate_policy was still run — treat the
+mean_return as valid. "race_dropout" means the agent was significantly behind peers at
+a midpoint check — also has a valid mean_return.
 
 Output ONLY a JSON array, no other text:
 [{{"rank": 1, "agent_id": "...", "algo": "...", "mean_return": 0.0, "rationale": "..."}}]"""

@@ -520,8 +520,8 @@ function Leaderboard({
   sentinel: SentinelEntry[];
   phase: "racing" | "done";
 }) {
-  // During race use current_reward; when done use mean_return from eval
-  const rows = plan.map(entry => {
+    const VALID_STATUSES = new Set(["completed", "early_stopped", "race_dropout"]);
+    const rows = plan.map(entry => {
     const hb = heartbeats.find(h => h.agent_id === entry.id);
     const res = results.find(r => r.agent_id === entry.id);
     const sentCount = sentinel.filter(s => s.agent_id === entry.id).length;
@@ -532,8 +532,10 @@ function Leaderboard({
       score: phase === "done" && res ? res.mean_return : (hb?.current_reward ?? -Infinity),
       status: hb?.status ?? "waiting",
       restarts: sentCount,
-      done: phase === "done" && res?.status === "completed",
-      failed: phase === "done" && res?.status !== "completed",
+      done: phase === "done" && res != null && VALID_STATUSES.has(res.status),
+      failed: phase === "done" && res != null && !VALID_STATUSES.has(res.status),
+      earlyStop: phase === "done" && res?.status === "early_stopped",
+      raceDrop: phase === "done" && res?.status === "race_dropout",
     };
   });
 
@@ -574,13 +576,14 @@ function Leaderboard({
           </div>
           {grp.map((row, i) => {
             const st = as(row.algo);
+            const icon = row.failed ? "✕" : row.earlyStop ? "⏭" : row.raceDrop ? "💨" : (MEDALS[i] ?? "·");
             return (
               <div key={row.id}
                 className={`flex items-center gap-2 rounded-lg px-3 py-2 border transition-all duration-500
                   ${row.failed ? "bg-red-950/30 border-red-900/30 opacity-60" :
                     i === 0 ? "bg-gray-800 border-gray-700 ring-1 ring-violet-700/40" :
                     "bg-gray-900 border-gray-800"}`}>
-                <span className="text-base w-6 shrink-0">{row.failed ? "✕" : (MEDALS[i] ?? "·")}</span>
+                <span className="text-base w-6 shrink-0">{icon}</span>
                 <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full shrink-0 ${st.badge}`}>{row.algo}</span>
                 <span className="text-xs text-gray-400 font-mono flex-1 truncate">{row.id}</span>
                 {row.restarts > 0 && (
@@ -816,6 +819,9 @@ export default function HomePage() {
   const [videoModal,  setVideoModal]  = useState<{ agentId: string; url: string; envId: string; envFamily: EnvFamily } | null>(null);
   const [grpoInfer,   setGrpoInfer]   = useState<Record<string, InferenceCase[]>>({});
   const [wandbArtifacts, setWandbArtifacts] = useState<Record<string, string>>({});
+  const [hfRepoUrl,   setHfRepoUrl]   = useState("");
+  const [hfSnippet,   setHfSnippet]   = useState("");
+  const [snippetCopied, setSnippetCopied] = useState(false);
 
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -875,6 +881,8 @@ export default function HomePage() {
           if (rData) {
             setResults(rData.results ?? []);
             setBest(rData.best ?? null);
+            if (rData.hf_repo_url) setHfRepoUrl(rData.hf_repo_url);
+            if (rData.hf_code_snippet) setHfSnippet(rData.hf_code_snippet);
           }
           setPhase("done");
         })
@@ -1086,6 +1094,7 @@ export default function HomePage() {
     setHeartbeats([]); setSentinel([]); setResults([]); setBest(null); setErrorMsg("");
     setHistory({}); setAnimStates({}); setInferring({}); setVideos({}); setVideoModal(null);
     setGrpoInfer({}); setWandbArtifacts({});
+    setHfRepoUrl(""); setHfSnippet(""); setSnippetCopied(false);
     prevSentinelCount.current = {};
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
@@ -1310,6 +1319,45 @@ export default function HomePage() {
                     <p className="text-xs text-gray-500 mb-2">
                       W&B artifact: <span className="font-mono text-violet-400">{wandbArtifacts[best.agent_id]}</span>
                     </p>
+                  )}
+
+                  {/* HuggingFace push result */}
+                  {hfRepoUrl && (
+                    <div className="bg-yellow-950/30 border border-yellow-800/40 rounded-xl p-3 mb-2 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base">🤗</span>
+                          <span className="text-xs font-semibold text-yellow-300">Pushed to HuggingFace</span>
+                        </div>
+                        <a href={hfRepoUrl} target="_blank" rel="noopener noreferrer"
+                          className="text-xs px-2 py-0.5 rounded-lg bg-yellow-900/60 hover:bg-yellow-800/60 text-yellow-300 border border-yellow-700/50 transition-colors">
+                          View repo ↗
+                        </a>
+                      </div>
+                      <p className="text-xs font-mono text-gray-400 truncate">{hfRepoUrl}</p>
+                    </div>
+                  )}
+
+                  {/* Standalone usage code snippet */}
+                  {hfSnippet && (
+                    <div className="bg-gray-950 border border-gray-700 rounded-xl overflow-hidden mb-2">
+                      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800">
+                        <span className="text-xs font-semibold text-gray-400">Standalone usage — copy & run</span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(hfSnippet).then(() => {
+                              setSnippetCopied(true);
+                              setTimeout(() => setSnippetCopied(false), 2000);
+                            });
+                          }}
+                          className="text-xs px-2 py-0.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-600 transition-colors">
+                          {snippetCopied ? "✓ Copied!" : "Copy"}
+                        </button>
+                      </div>
+                      <pre className="text-xs text-gray-300 font-mono p-3 overflow-x-auto max-h-56 leading-relaxed">
+                        {hfSnippet}
+                      </pre>
+                    </div>
                   )}
                   {history[best.agent_id]?.length >= 2 && (
                     <div className="bg-black/20 rounded-lg p-2">

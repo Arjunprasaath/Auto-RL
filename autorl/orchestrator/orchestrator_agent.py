@@ -49,13 +49,14 @@ class EvalResult(BaseModel):
     agent_id: str
     algo: str
     env: str
-    status: Literal["completed", "failed", "timed_out", "restarted"]
+    status: Literal["completed", "failed", "timed_out", "restarted", "early_stopped", "race_dropout"]
     mean_return: float = 0.0
     std_return: float = 0.0
     steps_trained: int = 0
     wall_time_s: float = 0.0
     weave_run_id: str = ""
     checkpoint_path: str = ""
+    warm_started: bool = False
 
 
 class NudgeConfig(BaseModel):

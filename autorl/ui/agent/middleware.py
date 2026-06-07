@@ -299,6 +299,27 @@ async def start_run(req: RunRequest) -> dict:
                 generate_report(req.run_dir)
             except Exception as rep_err:
                 print(f"[backend] reporter failed (non-fatal): {rep_err}")
+            # Push winning model to HuggingFace Hub
+            _VALID_HF_STATUSES = {"completed", "early_stopped", "race_dropout"}
+            valid_results = [r for r in results if r.status in _VALID_HF_STATUSES]
+            best_for_hf = max(valid_results, key=lambda r: r.mean_return) if valid_results else None
+            if best_for_hf and best_for_hf.checkpoint_path and os.path.exists(best_for_hf.checkpoint_path):
+                try:
+                    from training.hf_utils import push_model_to_hub
+                    hf_url, hf_snippet = push_model_to_hub(
+                        model_path=best_for_hf.checkpoint_path,
+                        agent_id=best_for_hf.agent_id,
+                        algo=best_for_hf.algo,
+                        env_id=best_for_hf.env,
+                        mean_return=best_for_hf.mean_return,
+                        std_return=best_for_hf.std_return,
+                        steps_trained=best_for_hf.steps_trained,
+                    )
+                    _runs[run_name]["hf_repo_url"] = hf_url
+                    _runs[run_name]["hf_code_snippet"] = hf_snippet
+                    print(f"[backend] HF push done → {hf_url}")
+                except Exception as hf_err:
+                    print(f"[backend] HF push skipped ({hf_err})")
             _runs[run_name]["status"] = "completed"
         except Exception as e:
             print(f"[backend] swarm failed: {e}")
@@ -393,8 +414,11 @@ def get_results(run_name: str) -> dict:
     sentinel_log = disk["sentinel_log"] if disk else _read_sentinel_log(run_dir)
 
     # Pick best by mean_return.
-    completed = [r for r in results if r.get("status") == "completed"]
-    best = max(completed, key=lambda r: r.get("mean_return", -1e9)) if completed else None
+    # Include early_stopped and race_dropout — these ran evaluate_policy and have
+    # valid mean_return values. Only exclude genuinely crashed/failed agents.
+    _VALID_STATUSES = {"completed", "early_stopped", "race_dropout"}
+    eligible = [r for r in results if r.get("status") in _VALID_STATUSES]
+    best = max(eligible, key=lambda r: r.get("mean_return", -1e9)) if eligible else None
 
     return {
         "run_name": run_name,
@@ -403,6 +427,8 @@ def get_results(run_name: str) -> dict:
         "best": best,
         "rankings": run.get("rankings", {}),
         "sentinel_log": sentinel_log,
+        "hf_repo_url": run.get("hf_repo_url", ""),
+        "hf_code_snippet": run.get("hf_code_snippet", ""),
     }
 
 
