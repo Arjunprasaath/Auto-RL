@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Agent card vanish (killed) */
+@keyframes agentVanish {
+  0%   { opacity: 1; transform: scale(1); filter: blur(0px); }
+  40%  { opacity: 0.6; transform: scale(1.04); filter: blur(0px); }
+  100% { opacity: 0; transform: scale(0.7); filter: blur(4px); }
+}
+
+/* Agent card appear (restarted) */
+@keyframes agentAppear {
+  0%   { opacity: 0; transform: scale(0.7) translateY(12px); filter: blur(4px); }
+  60%  { opacity: 1; transform: scale(1.03) translateY(-2px); filter: blur(0px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); filter: blur(0px); }
+}
+
+.agent-vanish {
+  animation: agentVanish 0.55s ease-in forwards;
+}
+.agent-appear {
+  animation: agentAppear 0.55s ease-out forwards;
+}

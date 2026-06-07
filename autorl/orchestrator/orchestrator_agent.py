@@ -105,7 +105,7 @@ Return JSON matching this schema exactly:
       "algo": "PPO",
       "env": "HalfCheetah-v5",
       "exec": "local",
-      "time_budget_min": 10,
+      "time_budget_min": 2,
       "hparams": {{ "lr": 0.0003, "gamma": 0.99, "n_steps": 2048, "ent_coef": 0.0, "seed": 42 }}
     }},
     {{
@@ -113,7 +113,7 @@ Return JSON matching this schema exactly:
       "algo": "GRPO",
       "env": "Countdown",
       "exec": "{countdown_exec}",
-      "time_budget_min": 20,
+      "time_budget_min": 5,
       "hparams": {{
         "model": "Qwen/Qwen2.5-3B-Instruct",
         "lr": 0.000001,
@@ -138,7 +138,7 @@ Required fields on every entry:
 ### MuJoCo locomotion (exec MUST be "local")
 - env: "HalfCheetah-v5" or "Hopper-v5"
 - algo: "PPO", "SAC", or "A2C" (Stable-Baselines3)
-- time_budget_min: 10
+- time_budget_min: 2
 - Required hparams:
   - lr: float learning rate (default 3e-4; vary across agents, e.g. 1e-4, 3e-4, 1e-3)
   - gamma: float discount (default 0.99)
@@ -151,7 +151,7 @@ Required fields on every entry:
 ### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}")
 - env: exactly "Countdown"
 - algo: exactly "GRPO"
-- time_budget_min: 20
+- time_budget_min: 5
 - Task: use given numbers with +, -, *, / to reach a target number
 - Required hparams:
   - model: always "Qwen/Qwen2.5-3B-Instruct"
@@ -189,13 +189,13 @@ _MUJOCO_ENVS = frozenset({"HalfCheetah-v5", "Hopper-v5"})
 _MUJOCO_ALGOS = frozenset({"PPO", "SAC", "A2C"})
 _COUNTDOWN_EXEC = _countdown_exec()
 _DEFAULT_PLAN = [
-    SpawnPlanEntry(id="agent_1", algo="PPO", env="HalfCheetah-v5", exec="local", time_budget_min=10,
+    SpawnPlanEntry(id="agent_1", algo="PPO", env="HalfCheetah-v5", exec="local", time_budget_min=2,
                    hparams={"lr": 3e-4, "gamma": 0.99, "n_steps": 2048, "seed": 42}),
-    SpawnPlanEntry(id="agent_2", algo="SAC", env="HalfCheetah-v5", exec="local", time_budget_min=10,
+    SpawnPlanEntry(id="agent_2", algo="SAC", env="HalfCheetah-v5", exec="local", time_budget_min=2,
                    hparams={"lr": 1e-3, "gamma": 0.99, "seed": 7}),
-    SpawnPlanEntry(id="agent_3", algo="GRPO", env="Countdown", exec=_COUNTDOWN_EXEC, time_budget_min=20,
+    SpawnPlanEntry(id="agent_3", algo="GRPO", env="Countdown", exec=_COUNTDOWN_EXEC, time_budget_min=5,
                    hparams={"model": _G, "lr": 1e-6, "num_generations": 4, "seed": 42}),
-    SpawnPlanEntry(id="agent_4", algo="GRPO", env="Countdown", exec=_COUNTDOWN_EXEC, time_budget_min=20,
+    SpawnPlanEntry(id="agent_4", algo="GRPO", env="Countdown", exec=_COUNTDOWN_EXEC, time_budget_min=5,
                    hparams={"model": _G, "lr": 1.0, "num_generations": 8, "seed": 123}),
 ]
 
@@ -210,11 +210,11 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
     seeds: dict[str, set] = {}
     for e in plan:
         if e.env in _MUJOCO_ENVS:
-            if e.exec != "local" or e.algo not in _MUJOCO_ALGOS or e.time_budget_min != 10:
-                raise ValueError(f"{e.id}: MuJoCo needs exec=local, algo PPO/SAC/A2C, time_budget_min=10")
+            if e.exec != "local" or e.algo not in _MUJOCO_ALGOS or e.time_budget_min != 2:
+                raise ValueError(f"{e.id}: MuJoCo needs exec=local, algo PPO/SAC/A2C, time_budget_min=2")
         elif e.env == "Countdown":
-            if e.algo != "GRPO" or e.time_budget_min != 20:
-                raise ValueError(f"{e.id}: Countdown needs algo GRPO, time_budget_min=20")
+            if e.algo != "GRPO" or e.time_budget_min != 5:
+                raise ValueError(f"{e.id}: Countdown needs algo GRPO, time_budget_min=5")
             if e.exec not in ("local", "runpod"):
                 raise ValueError(f"{e.id}: Countdown exec must be local or runpod")
             if e.exec != _COUNTDOWN_EXEC:

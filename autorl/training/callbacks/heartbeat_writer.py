@@ -99,10 +99,10 @@ class HeartbeatWriter:
         return None
 
     def _loop(self):
-        """Background loop: write heartbeat every 60 seconds."""
+        """Background loop: write heartbeat every 5 seconds."""
         while not self._stop.is_set():
             self._write()
-            self._stop.wait(60)
+            self._stop.wait(5)
 
     def _write(self):
         """Write the current state to heartbeat.json atomically."""

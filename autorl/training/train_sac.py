@@ -48,17 +48,26 @@ def main():
     cb = WeaveLogCallback(a.agent_id)
     callback = CallbackList([cb, wandb_cb]) if wandb_cb else cb
 
+    ckpt = f"{a.results_dir}/{a.agent_id}/model.zip"
+    best_reward = -float("inf")
+    SAVE_EVERY = 10_000  # steps between best-model checks
+
     start = time.time()
     steps = 0
     try:
         while time.time() - start < a.time_budget:
             model.learn(CHUNK, callback=callback, reset_num_timesteps=False, tb_log_name=ALGO)
             steps += CHUNK
-            hb.update(steps, cb.ep_returns[-1] if cb.ep_returns else 0.0)
+            current_reward = cb.ep_returns[-1] if cb.ep_returns else 0.0
+            hb.update(steps, current_reward)
             nudge = hb.check_nudge()
             if nudge:
                 model.policy.optimizer.param_groups[0]["lr"] = nudge.get("lr", a.lr)
                 print(f"[{a.agent_id}] nudged lr={nudge.get('lr')}")
+            if steps % SAVE_EVERY == 0 and current_reward > best_reward:
+                best_reward = current_reward
+                model.save(ckpt)
+                print(f"[{a.agent_id}] ✓ best checkpoint @ step {steps}: reward={current_reward:.1f}")
     except Exception as exc:
         print(f"[{a.agent_id}] training error: {exc}")
         hb.update(steps, cb.ep_returns[-1] if cb.ep_returns else 0.0, loss=float("nan"))
@@ -67,8 +76,8 @@ def main():
         sys.exit(1)
 
     mean_r, std_r = evaluate_policy(model, model.get_env(), n_eval_episodes=20)
-    ckpt = f"{a.results_dir}/{a.agent_id}/model.zip"
-    model.save(ckpt)
+    if mean_r > best_reward:
+        model.save(ckpt)
 
     with open(f"{a.results_dir}/{a.agent_id}/eval_result.json", "w") as f:
         json.dump({
