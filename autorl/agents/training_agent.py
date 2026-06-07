@@ -107,11 +107,16 @@ async def run_training_agent(
             f"[{entry.id}] launch (device={resolve_sb3_device()}): "
             f"{' '.join(cmd[1:])}"
         )
+        proc_env = subprocess_env()
+        reward_path = os.path.join(results_dir, "custom_reward.py")
+        if os.path.isfile(reward_path):
+            proc_env["AUTORL_REWARD_FN_PATH"] = reward_path
+
         async def _launch(retry: bool = False) -> tuple[int, str]:
             """Start the cmd, capture stderr for the doctor, return (exit_code, stderr)."""
             label = f"{entry.id}{'[retry]' if retry else ''}"
             p = await asyncio.create_subprocess_exec(
-                *cmd, cwd=_PKG_ROOT, env=subprocess_env(),
+                *cmd, cwd=_PKG_ROOT, env=proc_env,
                 stderr=asyncio.subprocess.PIPE,  # capture for doctor; stdout stays inherited
             )
             PROCESSES[entry.id] = p

@@ -113,6 +113,17 @@ class RunRequest(BaseModel):
     hf_model_name: str | None = None
 
 
+class SpawnRewardDesignRequest(BaseModel):
+    task: str
+    plan: list[dict]
+    history: list[dict] = []
+    message: str = ""
+
+
+class ApproveSpawnRewardRequest(BaseModel):
+    reward_code: str
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 RUNS_BASE = _PKG_ROOT / "runs"
@@ -300,6 +311,22 @@ async def start_run(req: RunRequest) -> dict:
     plan_path = os.path.join(req.run_dir, "spawn_plan.json")
     with open(plan_path, "w") as f:
         json.dump(req.plan, f, indent=2)
+
+    # Write shared custom reward file if the user approved one in the UI
+    reward_code = next(
+        (e.get("hparams", {}).get("reward_code") for e in req.plan if e.get("hparams", {}).get("reward_code")),
+        None,
+    )
+    if reward_code:
+        from agents.reward_designer_agent import validate_reward_code
+        try:
+            validate_reward_code(reward_code)
+            reward_path = Path(req.run_dir) / "custom_reward.py"
+            reward_path.write_text(reward_code)
+            print(f"[backend] custom reward written → {reward_path}")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     _save_run(run_name)
 
     async def _run_and_store() -> None:
@@ -645,6 +672,37 @@ async def serve_video(filename: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Video file not found")
     return FileResponse(str(path), media_type="video/mp4", filename=filename)
+
+
+# ── Reward designer (spawn / Gym agents) ──────────────────────────────────────
+
+
+@app.post("/api/design-spawn-reward")
+async def design_spawn_reward_endpoint(req: SpawnRewardDesignRequest) -> dict:
+    """One turn of the reward-design chat for a Gym spawn plan."""
+    from agents.reward_designer_agent import design_spawn_reward
+
+    try:
+        result = await asyncio.to_thread(
+            design_spawn_reward, req.task, req.plan, req.history, req.message
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Reward designer failed: {exc}") from exc
+    return result.model_dump()
+
+
+@app.post("/api/approve-spawn-reward")
+async def approve_spawn_reward_endpoint(req: ApproveSpawnRewardRequest) -> dict:
+    """Validate approved reward code before the UI attaches it to the spawn plan."""
+    from agents.reward_designer_agent import validate_reward_code
+
+    try:
+        validate_reward_code(req.reward_code)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 if __name__ == "__main__":

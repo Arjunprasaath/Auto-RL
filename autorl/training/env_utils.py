@@ -49,6 +49,9 @@ def make_env(env_id: str, render_mode: str | None = None) -> gymnasium.Env:
     if isinstance(env.observation_space, spaces.Tuple):
         env = FlattenObservation(env)
 
+    from training.reward_wrapper import maybe_wrap_reward
+    env = maybe_wrap_reward(env)
+
     return env
 
 

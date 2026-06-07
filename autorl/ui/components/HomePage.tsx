@@ -40,8 +40,15 @@ interface InferenceCase {
 }
 interface GrpoInferData { results: InferenceCase[]; baseline: InferenceCase[]; }
 interface HistPt { steps: number; reward: number; seg: number; }
-type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error";
+type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error" | "reward_design";
 type AnimState = "vanish" | "appear" | "idle";
+
+interface RewardMsg {
+  role: "user" | "assistant";
+  text: string;
+  code?: string;
+  explanation?: string;
+}
 
 // ── Env-family detection ───────────────────────────────────────────────────────
 
@@ -109,6 +116,23 @@ const ALGO_STYLE: Record<string, { accent: string; tag: string; bar: string; rgb
 const DEF_STYLE = { accent: "text-stone-600", tag: "text-stone-700 border-stone-300 bg-stone-50", bar: "bg-stone-400", rgb: "#78716c" };
 const as = (algo: string) => ALGO_STYLE[algo] ?? DEF_STYLE;
 const SEG_COLORS = ["#8b5cf6", "#06b6d4", "#34d399", "#fbbf24", "#f472b6"];
+
+const DEFAULT_REWARD_FN = `def reward_fn(obs, action, reward, terminated, truncated, info):
+    return float(reward)`;
+
+function getAgentRewardCode(entry: SpawnEntry, globalCode?: string): string {
+  const per = entry.hparams.reward_code;
+  if (typeof per === "string" && per.trim()) return per;
+  if (globalCode?.trim()) return globalCode;
+  return DEFAULT_REWARD_FN;
+}
+
+function hparamRows(entry: SpawnEntry): [string, string][] {
+  const skip = new Set(["reward_code", "wm_checkpoint", "wm_meta"]);
+  return Object.entries(entry.hparams)
+    .filter(([k]) => !skip.has(k))
+    .map(([k, v]) => [k, String(v)]);
+}
 
 // ── Mini SVG reward chart ──────────────────────────────────────────────────────
 
@@ -347,11 +371,14 @@ function formatLiveReward(reward: number, family: EnvFamily, env: string): strin
 
 function LiveAgentCard({
   entry, hb, history, sentinelEntries, doctorEntries, animState, onInfer, inferring,
+  rewardCode, onViewReward,
 }: {
   entry: SpawnEntry; hb?: Heartbeat; history: HistPt[];
   sentinelEntries: SentinelEntry[]; doctorEntries: SentinelEntry[];
   animState: AnimState;
   onInfer: () => void; inferring: boolean; hasVideo: boolean;
+  rewardCode: string;
+  onViewReward: () => void;
 }) {
   const st = as(entry.algo);
   const family = detectEnvFamily(entry.env);
@@ -374,6 +401,7 @@ function LiveAgentCard({
                              <span className="text-stone-500">○</span>;
 
   const animClass = animState === "vanish" ? "agent-vanish" : animState === "appear" ? "agent-appear" : "";
+  const hasCustomReward = rewardCode.trim() !== DEFAULT_REWARD_FN.trim();
 
   return (
     <div className={`border border-stone-200 bg-white text-sm
@@ -386,9 +414,12 @@ function LiveAgentCard({
           {statusDot}
           <span className={`border px-2 py-0.5 ${st.tag}`}>{entry.algo}</span>
           <span className="text-stone-600">{entry.id}</span>
+          {hasCustomReward && <span className="text-teal-600 text-xs">★</span>}
           {currentSeg > 0 && <span className="text-yellow-500 text-sm">restart×{currentSeg}</span>}
         </div>
         <div className="flex items-center gap-2.5">
+          <button type="button" onClick={onViewReward} title="Config & reward"
+            className="text-stone-400 hover:text-teal-600 text-xs px-1 transition-colors">⚙</button>
           <button onClick={onInfer} disabled={inferring}
             className={`px-2.5 py-1 border transition-colors text-sm
               ${inferring
@@ -463,6 +494,184 @@ function LiveAgentCard({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Reward modals & sidebar ───────────────────────────────────────────────────
+
+function RewardCodeModal({
+  title, code, readOnly, saving, entry, onChange, onSave, onClose, onEdit,
+}: {
+  title: string; code: string; readOnly: boolean; saving: boolean;
+  entry?: SpawnEntry;
+  onChange: (v: string) => void; onSave: () => void; onClose: () => void;
+  onEdit?: () => void;
+}) {
+  const hpRows = entry ? hparamRows(entry) : [];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={onClose}>
+      <div className="bg-white border border-stone-200 shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200">
+          <span className="text-sm font-semibold text-stone-800">{title}</span>
+          <button type="button" onClick={onClose} className="text-stone-400 hover:text-stone-700">×</button>
+        </div>
+        <div className="p-4 flex-1 overflow-y-auto space-y-3">
+          {entry && readOnly && (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-stone-600 border border-stone-200 rounded-lg p-3 bg-stone-50">
+              <span><span className="text-stone-400">env</span> {entry.env}</span>
+              <span><span className="text-stone-400">exec</span> {entry.exec}</span>
+              <span><span className="text-stone-400">algo</span> {entry.algo}</span>
+              <span><span className="text-stone-400">budget</span> {entry.time_budget_min}m</span>
+              {hpRows.map(([k, v]) => (
+                <span key={k}><span className="text-stone-400">{k}</span> {v}</span>
+              ))}
+            </div>
+          )}
+          {readOnly ? (
+            <pre className="text-xs bg-stone-900 text-green-300 rounded-lg p-3 overflow-x-auto font-mono leading-relaxed whitespace-pre-wrap">
+              {code}
+            </pre>
+          ) : (
+            <textarea value={code} onChange={e => onChange(e.target.value)} rows={14}
+              className="w-full text-xs font-mono bg-stone-900 text-green-300 rounded-lg p-3 outline-none focus:ring-1 focus:ring-amber-500 resize-y" />
+          )}
+          {!readOnly && (
+            <p className="text-xs text-stone-500">Saved rewards apply on the next training run.</p>
+          )}
+        </div>
+        <div className="flex gap-2 px-4 py-3 border-t border-stone-200">
+          <button type="button" onClick={onClose}
+            className="flex-1 border border-stone-300 text-stone-600 py-2 text-sm hover:bg-stone-50">
+            close
+          </button>
+          {readOnly && onEdit && (
+            <button type="button" onClick={onEdit}
+              className="flex-1 border border-amber-400 hover:bg-amber-50 text-amber-800 font-semibold py-2 text-sm">
+              edit reward
+            </button>
+          )}
+          {!readOnly && (
+            <button type="button" onClick={onSave} disabled={saving}
+              className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-black font-bold py-2 text-sm">
+              {saving ? "saving…" : "save"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RewardEditAllModal({
+  plan, globalCode, drafts, saving, onChange, onSave, onClose,
+}: {
+  plan: SpawnEntry[]; globalCode: string;
+  drafts: Record<string, string>; saving: boolean;
+  onChange: (agentId: string, code: string) => void;
+  onSave: () => void; onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={onClose}>
+      <div className="bg-white border border-stone-200 shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col"
+        onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-stone-200">
+          <span className="text-sm font-semibold text-stone-800">Edit reward per agent</span>
+          <button type="button" onClick={onClose} className="text-stone-400 hover:text-stone-700">×</button>
+        </div>
+        <div className="p-4 flex-1 overflow-y-auto space-y-4">
+          {plan.map(entry => (
+            <div key={entry.id} className="border border-stone-200 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-stone-50 border-b border-stone-200 flex items-center gap-2 text-xs">
+                <span className={`border px-1.5 py-0.5 ${as(entry.algo).tag}`}>{entry.algo}</span>
+                <span className="text-stone-700 font-medium">{entry.id}</span>
+                <span className="text-stone-500">{entry.env}</span>
+              </div>
+              <textarea
+                value={drafts[entry.id] ?? getAgentRewardCode(entry, globalCode)}
+                onChange={e => onChange(entry.id, e.target.value)}
+                rows={6}
+                className="w-full text-xs font-mono bg-stone-900 text-green-300 p-3 outline-none resize-y"
+              />
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2 px-4 py-3 border-t border-stone-200">
+          <button type="button" onClick={onClose}
+            className="flex-1 border border-stone-300 text-stone-600 py-2 text-sm">cancel</button>
+          <button type="button" onClick={onSave} disabled={saving}
+            className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-black font-bold py-2 text-sm">
+            {saving ? "saving…" : "save all"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RewardSidebarPanel({
+  plan, globalCode, onViewAgent, onEditAgent, onEditAll, onDesignWithAI,
+}: {
+  plan: SpawnEntry[];
+  globalCode: string;
+  onViewAgent: (agentId: string) => void;
+  onEditAgent: (agentId: string) => void;
+  onEditAll: () => void;
+  onDesignWithAI: () => void;
+}) {
+  const allSame = plan.length > 0 && plan.every(
+    e => getAgentRewardCode(e, globalCode) === getAgentRewardCode(plan[0], globalCode),
+  );
+  const customCount = plan.filter(
+    e => getAgentRewardCode(e, globalCode).trim() !== DEFAULT_REWARD_FN.trim(),
+  ).length;
+
+  return (
+    <div className="border border-stone-200 bg-white p-3 space-y-2 shrink-0">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-stone-600 uppercase tracking-wider">reward functions</span>
+        {customCount > 0 && (
+          <span className="text-xs text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded">{customCount} custom</span>
+        )}
+      </div>
+
+      {allSame && plan.length > 0 && (
+        <pre className="text-[10px] bg-stone-900 text-green-400/90 rounded p-2 overflow-hidden max-h-16 font-mono leading-snug">
+          {getAgentRewardCode(plan[0], globalCode).split("\n").slice(0, 3).join("\n")}
+          {"\n…"}
+        </pre>
+      )}
+
+      <div className="space-y-1 max-h-32 overflow-y-auto">
+        {plan.map(entry => {
+          const code = getAgentRewardCode(entry, globalCode);
+          const isCustom = code.trim() !== DEFAULT_REWARD_FN.trim();
+          return (
+            <div key={entry.id} className="flex items-center gap-1.5 text-xs group/row">
+              <span className="text-stone-500 w-14 truncate">{entry.id}</span>
+              <span className={`flex-1 truncate ${isCustom ? "text-teal-700" : "text-stone-400"}`}>
+                {isCustom ? "custom" : "env default"}
+              </span>
+              <button type="button" onClick={() => onViewAgent(entry.id)}
+                className="text-stone-400 hover:text-teal-600 px-1 opacity-70 group-hover/row:opacity-100">view</button>
+              <button type="button" onClick={() => onEditAgent(entry.id)}
+                className="text-stone-400 hover:text-amber-600 px-1 opacity-70 group-hover/row:opacity-100">edit</button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-col gap-1.5 pt-1 border-t border-stone-100">
+        <button type="button" onClick={onEditAll}
+          className="w-full text-xs border border-stone-300 hover:border-amber-500 text-stone-600 hover:text-amber-800 py-1.5 transition-colors">
+          edit each separately
+        </button>
+        <button type="button" onClick={onDesignWithAI}
+          className="w-full text-xs border border-amber-400 hover:bg-amber-50 text-amber-800 py-1.5 transition-colors">
+          ✏️ design with AI chat
+        </button>
+      </div>
     </div>
   );
 }
@@ -769,6 +978,110 @@ function Divider({ label }: { label?: string }) {
   );
 }
 
+// ── Reward design chat (spawn plan) ───────────────────────────────────────────
+
+function RewardDesignPanel({
+  task, plan, msgs, input, busy, applying, rewardCode, rewardExplanation,
+  chatRef, onInput, onSend, onApprove, onBack,
+}: {
+  task: string; plan: SpawnEntry[]; msgs: RewardMsg[];
+  input: string; busy: boolean; applying: boolean;
+  rewardCode: string; rewardExplanation: string;
+  chatRef: React.RefObject<HTMLDivElement | null>;
+  onInput: (v: string) => void;
+  onSend: () => void;
+  onApprove: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <div className="w-full max-w-2xl space-y-4">
+      <div className="flex items-center justify-between">
+        <span className="text-stone-800 font-semibold text-sm">Design Reward Function</span>
+        <button onClick={onBack} className="text-xs text-stone-500 hover:text-stone-700">← back to lineup</button>
+      </div>
+
+      <p className="text-stone-500 text-sm italic">&ldquo;{task}&rdquo;</p>
+
+      <div className="flex flex-wrap gap-2 text-xs">
+        {plan.map(e => (
+          <span key={e.id} className="border border-stone-200 bg-white px-2 py-1 text-stone-600">
+            {e.id} · {e.algo} · {e.env}
+          </span>
+        ))}
+      </div>
+
+      <div ref={chatRef} className="bg-white border border-stone-200 rounded-xl p-4 space-y-4 max-h-80 overflow-y-auto">
+        {msgs.length === 0 && (
+          <div className="flex items-center gap-2 text-stone-500 text-sm">
+            <div className="w-4 h-4 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+            Analysing spawn plan…
+          </div>
+        )}
+        {msgs.map((msg, i) => (
+          <div key={i} className={`flex gap-3 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
+            <div className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs
+              ${msg.role === "assistant" ? "bg-amber-100 text-amber-800" : "bg-stone-200 text-stone-600"}`}>
+              {msg.role === "assistant" ? "🤖" : "You"}
+            </div>
+            <div className="flex-1 min-w-0 space-y-2">
+              <p className={`text-sm leading-relaxed rounded-lg px-3 py-2 max-w-full
+                ${msg.role === "assistant" ? "bg-stone-50 text-stone-800" : "bg-amber-50 text-stone-800 ml-auto text-right"}`}>
+                {msg.text}
+              </p>
+              {msg.code && (
+                <pre className="text-xs bg-stone-900 text-green-300 rounded-lg p-3 overflow-x-auto font-mono leading-relaxed">
+                  {msg.code}
+                </pre>
+              )}
+              {msg.explanation && <p className="text-xs text-stone-500 italic">{msg.explanation}</p>}
+            </div>
+          </div>
+        ))}
+        {busy && (
+          <div className="flex items-center gap-2 text-stone-500 text-sm">
+            <div className="w-4 h-4 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+            Thinking…
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          value={input}
+          onChange={e => onInput(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === "Enter" && !e.shiftKey && input.trim() && !busy) onSend();
+          }}
+          disabled={busy}
+          placeholder="Ask for changes… (e.g. penalize large actions, bonus for speed)"
+          className="flex-1 bg-white border border-stone-300 focus:border-amber-600 px-3 py-2 text-sm text-stone-800 placeholder-stone-400 outline-none disabled:opacity-40"
+        />
+        <button
+          disabled={!input.trim() || busy}
+          onClick={onSend}
+          className="px-4 py-2 text-sm font-semibold border border-stone-300 hover:border-amber-600 text-stone-700 disabled:opacity-40 transition-colors">
+          Send
+        </button>
+      </div>
+
+      {rewardExplanation && (
+        <p className="text-xs text-teal-700 bg-teal-50 border border-teal-200 rounded-lg px-3 py-2">
+          Latest: {rewardExplanation}
+        </p>
+      )}
+
+      <button
+        onClick={onApprove}
+        disabled={!rewardCode || busy || applying}
+        className="w-full bg-amber-600 hover:bg-amber-500 disabled:bg-stone-100 disabled:text-stone-400 text-black font-bold py-3 text-sm transition-colors flex items-center justify-center gap-2">
+        {applying
+          ? <><div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" /> Validating…</>
+          : "✅ Approve reward & return to lineup"}
+      </button>
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
@@ -796,6 +1109,20 @@ export default function HomePage() {
   const [hfModelName, setHfModelName] = useState("");
   const [hfPushedAt,  setHfPushedAt]  = useState("");
   const [snippetCopied, setSnippetCopied] = useState(false);
+
+  const [rewardMsgs,         setRewardMsgs]         = useState<RewardMsg[]>([]);
+  const [rewardCode,         setRewardCode]         = useState("");
+  const [rewardExplanation,setRewardExplanation]  = useState("");
+  const [rewardInput,        setRewardInput]        = useState("");
+  const [rewardBusy,         setRewardBusy]         = useState(false);
+  const [rewardApplying,     setRewardApplying]     = useState(false);
+  const [rewardDesignReturnPhase, setRewardDesignReturnPhase] = useState<Phase>("plan_ready");
+  const [rewardModal,        setRewardModal]        = useState<{ agentId: string; mode: "view" | "edit" } | null>(null);
+  const [rewardModalDraft,   setRewardModalDraft]   = useState("");
+  const [rewardModalSaving,  setRewardModalSaving]  = useState(false);
+  const [rewardEditAllOpen,  setRewardEditAllOpen]  = useState(false);
+  const [rewardEditAllDrafts,setRewardEditAllDrafts] = useState<Record<string, string>>({});
+  const rewardChatRef = useRef<HTMLDivElement>(null);
 
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -970,6 +1297,131 @@ export default function HomePage() {
     } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); setPhase("error"); }
   };
 
+  const rewardHistory = (msgs: RewardMsg[]): { role: string; content: string }[] =>
+    msgs.map(m => ({
+      role: m.role,
+      content: m.role === "assistant"
+        ? JSON.stringify({ message: m.text, code: m.code ?? "", explanation: m.explanation ?? "" })
+        : m.text,
+    }));
+
+  const sendRewardMessage = async (userText: string, msgs: RewardMsg[]) => {
+    setRewardBusy(true);
+    const nextMsgs: RewardMsg[] = userText ? [...msgs, { role: "user", text: userText }] : msgs;
+    if (userText) setRewardMsgs(nextMsgs);
+    try {
+      const res = await fetch(`${BACKEND}/api/design-spawn-reward`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task, plan, history: rewardHistory(msgs), message: userText }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(e.detail ?? res.statusText);
+      }
+      const data = await res.json();
+      setRewardMsgs([...nextMsgs, {
+        role: "assistant", text: data.message, code: data.code, explanation: data.explanation,
+      }]);
+      setRewardCode(data.code);
+      setRewardExplanation(data.explanation ?? "");
+      setTimeout(() => rewardChatRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 80);
+    } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); }
+    finally { setRewardBusy(false); }
+  };
+
+  const handleEnterRewardDesign = (returnPhase: Phase = "plan_ready") => {
+    setRewardDesignReturnPhase(returnPhase);
+    setPhase("reward_design");
+    setRewardMsgs([]); setRewardCode(""); setRewardExplanation(""); setRewardInput(""); setErrorMsg("");
+    sendRewardMessage("", []);
+  };
+
+  const validateRewardCode = async (code: string) => {
+    const res = await fetch(`${BACKEND}/api/approve-spawn-reward`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reward_code: code }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(e.detail ?? res.statusText);
+    }
+  };
+
+  const openRewardView = (agentId: string) => {
+    const entry = plan.find(e => e.id === agentId);
+    if (!entry) return;
+    setRewardModalDraft(getAgentRewardCode(entry, rewardCode));
+    setRewardModal({ agentId, mode: "view" });
+  };
+
+  const openRewardEdit = (agentId: string) => {
+    const entry = plan.find(e => e.id === agentId);
+    if (!entry) return;
+    setRewardModalDraft(getAgentRewardCode(entry, rewardCode));
+    setRewardModal({ agentId, mode: "edit" });
+  };
+
+  const openRewardEditAll = () => {
+    const drafts: Record<string, string> = {};
+    for (const e of plan) drafts[e.id] = getAgentRewardCode(e, rewardCode);
+    setRewardEditAllDrafts(drafts);
+    setRewardEditAllOpen(true);
+  };
+
+  const saveSingleAgentReward = async () => {
+    if (!rewardModal) return;
+    setRewardModalSaving(true); setErrorMsg("");
+    try {
+      await validateRewardCode(rewardModalDraft);
+      setPlan(prev => prev.map(e => e.id === rewardModal.agentId
+        ? { ...e, hparams: { ...e.hparams, reward_code: rewardModalDraft } }
+        : e));
+      setRewardModal(null);
+    } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); }
+    finally { setRewardModalSaving(false); }
+  };
+
+  const saveAllAgentRewards = async () => {
+    setRewardModalSaving(true); setErrorMsg("");
+    try {
+      for (const code of Object.values(rewardEditAllDrafts)) await validateRewardCode(code);
+      setPlan(prev => prev.map(e => ({
+        ...e,
+        hparams: { ...e.hparams, reward_code: rewardEditAllDrafts[e.id] ?? getAgentRewardCode(e, rewardCode) },
+      })));
+      setRewardEditAllOpen(false);
+    } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); }
+    finally { setRewardModalSaving(false); }
+  };
+
+  const handleApproveReward = async () => {
+    if (!rewardCode) return;
+    setRewardApplying(true); setErrorMsg("");
+    try {
+      const res = await fetch(`${BACKEND}/api/approve-spawn-reward`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reward_code: rewardCode }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(e.detail ?? res.statusText);
+      }
+      setPlan(prev => prev.map(e => ({
+        ...e,
+        hparams: { ...e.hparams, reward_code: rewardCode },
+      })));
+      setPhase(rewardDesignReturnPhase);
+    } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); }
+    finally { setRewardApplying(false); }
+  };
+
+  const handleRewardSend = () => {
+    const txt = rewardInput.trim();
+    if (!txt || rewardBusy) return;
+    setRewardInput("");
+    sendRewardMessage(txt, rewardMsgs);
+  };
+
   const handleGrpoInfer = async (agentId: string) => {
     if (grpoInfer[agentId]?.results?.length) return;
     setInferring(p => ({ ...p, [agentId]: true }));
@@ -1009,6 +1461,9 @@ export default function HomePage() {
     setHistory({}); setAnimStates({}); setInferring({}); setVideos({}); setVideoModal(null);
     setGrpoInfer({}); setWandbArtifacts({});
     setHfRepoUrl(""); setHfSnippet(""); setHfModelName(""); setHfPushedAt(""); setSnippetCopied(false);
+    setRewardMsgs([]); setRewardCode(""); setRewardExplanation(""); setRewardInput("");
+    setRewardBusy(false); setRewardApplying(false);
+    setRewardModal(null); setRewardEditAllOpen(false); setRewardEditAllDrafts({});
     prevSentinelCount.current = {};
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
@@ -1035,6 +1490,35 @@ export default function HomePage() {
         <VideoModal url={videoModal.url} agentId={videoModal.agentId}
           envId={videoModal.envId} envFamily={videoModal.envFamily}
           onClose={() => setVideoModal(null)} />
+      )}
+
+      {rewardModal && (
+        <RewardCodeModal
+          title={rewardModal.mode === "view"
+            ? `${rewardModal.agentId} — config & reward`
+            : `Edit ${rewardModal.agentId} reward`}
+          entry={plan.find(e => e.id === rewardModal.agentId)}
+          code={rewardModalDraft}
+          readOnly={rewardModal.mode === "view"}
+          saving={rewardModalSaving}
+          onChange={setRewardModalDraft}
+          onSave={saveSingleAgentReward}
+          onClose={() => setRewardModal(null)}
+          onEdit={rewardModal.mode === "view"
+            ? () => openRewardEdit(rewardModal.agentId)
+            : undefined}
+        />
+      )}
+
+      {rewardEditAllOpen && (
+        <RewardEditAllModal
+          plan={plan} globalCode={rewardCode}
+          drafts={rewardEditAllDrafts}
+          saving={rewardModalSaving}
+          onChange={(id, code) => setRewardEditAllDrafts(d => ({ ...d, [id]: code }))}
+          onSave={saveAllAgentRewards}
+          onClose={() => setRewardEditAllOpen(false)}
+        />
       )}
 
       {/* ── Header ── */}
@@ -1087,6 +1571,20 @@ export default function HomePage() {
       {/* ── PLANNING ── */}
       {phase === "planning" && <PlanningScreen task={task} />}
 
+      {/* ── REWARD DESIGN ── */}
+      {phase === "reward_design" && (
+        <RewardDesignPanel
+          task={task} plan={plan} msgs={rewardMsgs}
+          input={rewardInput} busy={rewardBusy} applying={rewardApplying}
+          rewardCode={rewardCode} rewardExplanation={rewardExplanation}
+          chatRef={rewardChatRef}
+          onInput={setRewardInput}
+          onSend={handleRewardSend}
+          onApprove={handleApproveReward}
+          onBack={() => setPhase(rewardDesignReturnPhase)}
+        />
+      )}
+
       {/* ── PLAN READY ── */}
       {phase === "plan_ready" && (
         <div className="w-full max-w-2xl space-y-4">
@@ -1106,6 +1604,13 @@ export default function HomePage() {
             <div className="border border-yellow-300 bg-amber-50 px-3 py-2 text-sm">
               <span className="text-yellow-500">sentinel active</span>
               <span className="text-stone-500 ml-2">one agent has a dangerously high lr — doom loop expected</span>
+            </div>
+          )}
+
+          {plan.some(e => e.hparams.reward_code) && (
+            <div className="border border-teal-300 bg-teal-50 px-3 py-2 text-sm">
+              <span className="text-teal-700 font-semibold">custom reward active</span>
+              <span className="text-stone-600 ml-2">{rewardExplanation || "shaped reward will wrap env step reward"}</span>
             </div>
           )}
 
@@ -1145,6 +1650,10 @@ export default function HomePage() {
             <button onClick={handleReset}
               className="flex-1 border border-stone-300 hover:border-stone-400 text-stone-600 hover:text-stone-700 py-3 text-sm transition-colors">
               ← back
+            </button>
+            <button onClick={() => handleEnterRewardDesign("plan_ready")} disabled={plan.length === 0}
+              className="flex-1 border border-amber-400 hover:bg-amber-50 disabled:opacity-40 text-amber-800 font-semibold py-3 text-sm transition-colors">
+              ✏️ design reward
             </button>
             <button onClick={handleLaunch} disabled={plan.length === 0}
               className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:bg-stone-100 disabled:text-stone-400 text-black font-bold py-3 text-sm transition-colors">
@@ -1188,7 +1697,9 @@ export default function HomePage() {
                   history={history[e.id] ?? []} sentinelEntries={sentByAgent[e.id] ?? []}
                   doctorEntries={doctorByAgent[e.id] ?? []}
                   animState={animStates[e.id] ?? "idle"}
-                  onInfer={() => handleInfer(e.id)} inferring={!!inferring[e.id]} hasVideo={!!videos[e.id]} />
+                  onInfer={() => handleInfer(e.id)} inferring={!!inferring[e.id]} hasVideo={!!videos[e.id]}
+                  rewardCode={getAgentRewardCode(e, rewardCode)}
+                  onViewReward={() => openRewardView(e.id)} />
               ))}
               {doctorLog.length > 0 && (
                 <div className="space-y-2 pt-2">
@@ -1204,8 +1715,17 @@ export default function HomePage() {
               )}
               <p className="text-stone-500 text-sm text-center py-2">polling every 2 s</p>
             </div>
-            <div className="w-72 xl:w-80 shrink-0 sticky top-6 border border-stone-200 bg-white p-4">
-              <Leaderboard plan={plan} heartbeats={heartbeats} results={[]} sentinel={sentinel} phase="racing" />
+            <div className="w-72 xl:w-80 shrink-0 sticky top-6 flex flex-col gap-3 max-h-[calc(100vh-100px)]">
+              <div className="border border-stone-200 bg-white p-4 overflow-y-auto flex-1 min-h-0">
+                <Leaderboard plan={plan} heartbeats={heartbeats} results={[]} sentinel={sentinel} phase="racing" />
+              </div>
+              <RewardSidebarPanel
+                plan={plan} globalCode={rewardCode}
+                onViewAgent={openRewardView}
+                onEditAgent={openRewardEdit}
+                onEditAll={openRewardEditAll}
+                onDesignWithAI={() => handleEnterRewardDesign("racing")}
+              />
             </div>
           </div>
         </div>
@@ -1317,7 +1837,9 @@ export default function HomePage() {
                   history={history[e.id] ?? []} sentinelEntries={sentByAgent[e.id] ?? []}
                   doctorEntries={doctorByAgent[e.id] ?? []}
                   animState="idle" onInfer={() => handleInfer(e.id)}
-                  inferring={!!inferring[e.id]} hasVideo={!!videos[e.id]} />
+                  inferring={!!inferring[e.id]} hasVideo={!!videos[e.id]}
+                  rewardCode={getAgentRewardCode(e, rewardCode)}
+                  onViewReward={() => openRewardView(e.id)} />
               ))}
 
               {doctorLog.length > 0 && (
@@ -1334,8 +1856,17 @@ export default function HomePage() {
               )}
             </div>
 
-            <div className="w-72 xl:w-80 shrink-0 sticky top-6 border border-stone-200 bg-white p-4">
-              <Leaderboard plan={plan} heartbeats={heartbeats} results={results} sentinel={sentinel} phase="done" />
+            <div className="w-72 xl:w-80 shrink-0 sticky top-6 flex flex-col gap-3 max-h-[calc(100vh-100px)]">
+              <div className="border border-stone-200 bg-white p-4 overflow-y-auto flex-1 min-h-0">
+                <Leaderboard plan={plan} heartbeats={heartbeats} results={results} sentinel={sentinel} phase="done" />
+              </div>
+              <RewardSidebarPanel
+                plan={plan} globalCode={rewardCode}
+                onViewAgent={openRewardView}
+                onEditAgent={openRewardEdit}
+                onEditAll={openRewardEditAll}
+                onDesignWithAI={() => handleEnterRewardDesign("done")}
+              />
             </div>
           </div>
         </div>
