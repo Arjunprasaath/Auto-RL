@@ -198,7 +198,9 @@ Environments: LunarLander-v3 (discrete → PPO/A2C only),
 ## Planning rules
 1. Spawn a maximum of 10 agents unless the user explicitly asks for a different count.
 2. Match agents to the user task — infer the most appropriate Gymnasium env(s) from the description.
-   If the user names a specific env (e.g. "CartPole", "Ant"), use it exactly.
+   If the user names a specific env (e.g. "CartPole", "Ant", "Hopper-v5"), use it EXACTLY — do NOT
+   substitute a different environment. If the prompt includes a CONSTRAINT line listing envs, every
+   agent MUST use one of those environments without exception.
 3. Vary algo, env, lr, n_steps, and ent_coef across agents so the race is informative.
 4. Every agent with the same algo MUST have a different seed.
 5. Include EXACTLY ONE SB3 agent (PPO, SAC, or A2C — never GRPO) with hparams.lr = 1.0 (Sentinel fault-tolerance demo).
@@ -206,6 +208,70 @@ Environments: LunarLander-v3 (discrete → PPO/A2C only),
    NEVER set lr=1.0 on a GRPO agent — LLM fine-tuning is expensive and must use valid hyperparameters.
 6. Never use SAC for discrete-action environments.
 """
+
+
+# ── Known environment catalogue (for prompt-time env extraction) ──────────────
+
+_ENV_CATALOGUE: list[tuple[str, str]] = [
+    # (canonical_id, comma-separated aliases/keywords)
+    # MuJoCo
+    ("HalfCheetah-v5",            "halfcheetah,half cheetah,half-cheetah"),
+    ("Hopper-v5",                 "hopper"),
+    ("Ant-v5",                    "ant"),
+    ("Walker2d-v5",               "walker,walker2d,walker 2d"),
+    ("Swimmer-v5",                "swimmer"),
+    ("Humanoid-v5",               "humanoid"),
+    ("HumanoidStandup-v5",        "humanoidstandup,humanoid standup,humanoid-standup"),
+    ("Reacher-v5",                "reacher"),
+    ("Pusher-v5",                 "pusher"),
+    ("InvertedPendulum-v5",       "invertedpendulum,inverted pendulum"),
+    ("InvertedDoublePendulum-v5", "inverteddoublependulum,inverted double pendulum"),
+    # Classic Control
+    ("CartPole-v1",               "cartpole,cart pole,cart-pole"),
+    ("Pendulum-v1",               "pendulum"),
+    ("Acrobot-v1",                "acrobot"),
+    ("MountainCar-v0",            "mountaincar,mountain car,mountain-car"),
+    ("MountainCarContinuous-v0",  "mountaincarcontinuous,mountain car continuous"),
+    # Toy Text
+    ("FrozenLake-v1",             "frozenlake,frozen lake,frozen-lake"),
+    ("FrozenLake8x8-v1",          "frozenlake8x8,frozen lake 8x8"),
+    ("Taxi-v3",                   "taxi"),
+    ("CliffWalking-v1",           "cliffwalking,cliff walking,cliff walk"),
+    ("Blackjack-v1",              "blackjack"),
+    # Box2D
+    ("LunarLander-v3",            "lunarlander,lunar lander,lunar-lander"),
+    ("LunarLanderContinuous-v3",  "lunarlandercontinuous,lunar lander continuous"),
+    ("BipedalWalker-v3",          "bipedalwalker,bipedal walker"),
+    # GRPO
+    ("Countdown",                 "countdown"),
+]
+
+
+def _extract_env_from_task(task: str) -> list[str]:
+    """Return canonical env IDs explicitly named in the user task.
+
+    Checks the task string (case-insensitive) against the full env catalogue —
+    both exact version-tagged ids (e.g. 'HalfCheetah-v5') and keyword aliases.
+    Returns a deduplicated list preserving first-seen order.
+    """
+    task_lower = task.lower()
+    found: list[str] = []
+    seen: set[str] = set()
+    for canonical, aliases in _ENV_CATALOGUE:
+        # Exact canonical match (e.g. "HalfCheetah-v5" in task)
+        if canonical.lower() in task_lower:
+            if canonical not in seen:
+                found.append(canonical)
+                seen.add(canonical)
+            continue
+        # Keyword / alias match
+        for kw in aliases.split(","):
+            if kw.strip() and kw.strip() in task_lower:
+                if canonical not in seen:
+                    found.append(canonical)
+                    seen.add(canonical)
+                break
+    return found
 
 
 class SpawnPlan(BaseModel):
@@ -296,7 +362,24 @@ def _finalize(plan: list[SpawnPlanEntry], path: str) -> list[SpawnPlanEntry]:
 @weave.op(name="Orchestrator")
 async def create_spawn_plan(task: str, path: str) -> list[SpawnPlanEntry]:
     history_block = _build_history_context()
-    prompt = f"{task}\n\n{history_block}" if history_block else task
+
+    # Extract any environments explicitly named in the user prompt and pin them
+    # as a hard constraint so the LLM cannot silently substitute a different env.
+    named_envs = _extract_env_from_task(task)
+    if named_envs:
+        env_list = ", ".join(f'"{e}"' for e in named_envs)
+        env_constraint = (
+            f"CONSTRAINT: The user explicitly requested these environment(s): {env_list}. "
+            f"ALL agents MUST use one of these environments. "
+            f"Do NOT substitute a different environment."
+        )
+        print(f"[orchestrator] env constraint from prompt: {named_envs}")
+    else:
+        env_constraint = ""
+
+    parts = [p for p in [env_constraint, task, history_block] if p]
+    prompt = "\n\n".join(parts)
+
     for attempt in range(2):
         try:
             raw = (await Runner.run(_orchestrator, prompt)).final_output.entries
