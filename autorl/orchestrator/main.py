@@ -36,6 +36,7 @@ from orchestrator.orchestrator_agent import (
 )
 from orchestrator.swarm_runner import run_swarm
 from evaluator.evaluator_agent import evaluate_results
+from evaluator.reporter import generate_report
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -134,6 +135,12 @@ async def pipeline(task: str, run_dir: str) -> dict:
     summary_path = os.path.join(run_dir, "pipeline_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
+
+    # ── Step 5: generate run report ───────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"[pipeline] step 5 — run report")
+    print(f"{'='*60}")
+    generate_report(run_dir)
 
     _print_summary(rankings, video_path)
     return summary

@@ -8,13 +8,18 @@ launched as a replacement agent via agents.training_agent.
 
 All interventions are appended to sentinel_log.json in the run directory so
 the full history of "what was tried and what happened" persists after the run.
+Each intervention also writes sentinel_alert.json so the UI can render it.
 
 Failure modes handled
 ─────────────────────
-  nan_loss             weights exploded → kill immediately, LLM-restart once
-  stale_heartbeat      agent frozen >120 s → LLM nudge (write nudge.json)
-  stale_after_nudge    still frozen >240 s → LLM-restart once
-  second_failure       any failure after one restart → kill permanently
+  nan_loss                  weights exploded → kill + LLM-restart once
+  critic_diverged           EV < -0.5 after 10k steps → kill + LLM-restart once
+  plateau                   reward stuck → LLM nudge → LLM-restart if still stuck
+  entropy_collapsed         PPO entropy near 0 before 50k steps → LLM nudge
+  episode_length_regression agent survived then forgot → LLM nudge
+  stale_heartbeat           frozen >120 s → LLM nudge
+  stale_after_nudge         still frozen >240 s → LLM-restart once
+  second_failure            any failure after one restart → kill permanently
 """
 
 from __future__ import annotations
@@ -47,24 +52,31 @@ training runs.
 
 You receive:
   1. The original spawn-plan entry for a failed agent (algo, env, hparams).
-  2. The failure reason: "nan_loss", "stale_heartbeat_nudge", or "stale_after_nudge".
+  2. The failure reason (one of the types below).
   3. A history of all prior sentinel interventions on this run.
 
-Your job: suggest a NEW hyperparameter configuration that is likely to succeed,
-given what has already been tried and what failed.
+Failure reasons and recommended responses
+─────────────────────────────────────────
+  nan_loss                  — weights exploded. Lower lr dramatically (1e-4 – 5e-4).
+  critic_diverged           — value function worse than mean-predictor. Lower lr, raise n_steps.
+  plateau                   — reward stuck. Try different seed, adjust ent_coef or gamma.
+  entropy_collapsed         — policy has lost all exploration. Raise ent_coef (0.01 – 0.1).
+  episode_length_regression — agent learned to survive then forgot. Lower lr, raise ent_coef.
+  stale_heartbeat_nudge     — process frozen. New seed; optionally adjust n_steps.
+  stale_after_nudge         — still frozen after nudge. New seed + lower lr.
 
 Rules
 ─────
   • Keep the same algo and env as the original entry.
   • NEVER suggest lr >= 0.1 (high lr causes NaN).
   • NEVER repeat an lr that has already been tried and failed.
-  • For nan_loss: suggest a much lower lr (1e-4 – 5e-4).
-  • For stale / frozen: try a different seed; optionally adjust n_steps or ent_coef.
   • Be creative — vary multiple hparams if prior same-algo attempts all failed.
-  • Output ONLY a JSON object of numeric hyperparameters, no other text.
+  • Always include a short "rationale" string (1–2 sentences) explaining why you
+    chose these values. This is shown to the user in the UI.
 
-Output format (all fields optional except lr and seed):
-  {"lr": 0.0003, "seed": 9999, "n_steps": 1024, "ent_coef": 0.01, "gamma": 0.99}
+Output ONLY a JSON object — no other text:
+  {"lr": 0.0003, "seed": 9999, "n_steps": 1024, "ent_coef": 0.01, "gamma": 0.99,
+   "rationale": "Original lr=1.0 caused NaN. 3e-4 is the standard safe range for PPO on MuJoCo."}
 """
 
 
@@ -74,6 +86,7 @@ class SentinelHparams(BaseModel):
     n_steps: int | None = None
     ent_coef: float | None = None
     gamma: float | None = None
+    rationale: str = ""
 
 
 _sentinel_agent = Agent(
@@ -120,6 +133,26 @@ def _write_nudge(results_dir: str, agent_id: str, hparams: dict) -> None:
         json.dump(hparams, f)
     os.replace(tmp, nudge_path)
     print(f"[sentinel] nudged {agent_id} → {hparams}")
+
+
+def _write_alert(results_dir: str, agent_id: str, anomaly: str,
+                 failed_hparams: dict, new_hparams: dict, action: str) -> None:
+    """Write sentinel_alert.json for the CopilotKit UI to render."""
+    alert = {
+        "agent_id":      agent_id,
+        "anomaly":       anomaly,
+        "action":        action,   # "kill_restart" | "nudge"
+        "failed_hparams": failed_hparams,
+        "new_hparams":   {k: v for k, v in new_hparams.items() if k != "rationale"},
+        "rationale":     new_hparams.get("rationale", ""),
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+    }
+    alert_path = os.path.join(results_dir, "sentinel_alert.json")
+    tmp = alert_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(alert, f, indent=2)
+    os.replace(tmp, alert_path)
+    print(f"[sentinel] alert written → {alert_path}")
 
 
 # ─── LLM call ────────────────────────────────────────────────────────────────
@@ -202,7 +235,8 @@ async def run_sentinel(
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[sentinel] LLM call failed ({exc}), falling back to lr=3e-4")
-            new_hparams = {"lr": 3e-4, "seed": entry.hparams.get("seed", 42) + 1000}
+            new_hparams = {"lr": 3e-4, "seed": entry.hparams.get("seed", 42) + 1000,
+                           "rationale": f"LLM call failed ({exc}); safe fallback lr=3e-4."}
 
         # Record the decision before launching.
         log_entry: dict = {
@@ -212,14 +246,19 @@ async def run_sentinel(
             "failed_hparams": entry.hparams,
             "heartbeat_at_failure": hb,
             "llm_suggested_hparams": new_hparams,
+            "rationale": new_hparams.get("rationale", ""),
             "outcome": "pending",
         }
         _append_log(log_path, log_entry)
         log_idx = len(_load_log(log_path)) - 1
 
+        _write_alert(results_dir, agent_id, failure_reason,
+                     entry.hparams, new_hparams, "kill_restart")
+
         print(
             f"[sentinel] {agent_id}: killing and restarting with LLM config "
-            f"lr={new_hparams.get('lr')} seed={new_hparams.get('seed')}"
+            f"lr={new_hparams.get('lr')} seed={new_hparams.get('seed')} "
+            f"— {new_hparams.get('rationale', '')}"
         )
         await kill_training_agent(agent_id)
 
@@ -246,36 +285,41 @@ async def run_sentinel(
         asyncio.create_task(_run_and_log())
         restarted.add(agent_id)
 
-    async def _nudge_with_llm(agent_id: str, hb: dict) -> None:
+    async def _nudge_with_llm(agent_id: str, hb: dict,
+                              reason: str = "stale_heartbeat_nudge") -> None:
         """Write nudge.json with LLM-suggested hparams; do not kill the agent."""
         entry = plan_by_id.get(agent_id)
         if entry is None:
             return
 
         prior = _load_log(log_path)
-        print(f"[sentinel] {agent_id}: stale heartbeat — asking LLM for nudge config")
+        print(f"[sentinel] {agent_id}: {reason} — asking LLM for nudge config")
 
         try:
             new_hparams = await _llm_suggest_hparams(
                 entry_dict=entry.model_dump(),
-                failure_reason="stale_heartbeat_nudge",
+                failure_reason=reason,
                 prior_interventions=prior,
             )
         except Exception as exc:  # noqa: BLE001
             current_lr = hb.get("current_lr") or entry.hparams.get("lr", 3e-4)
-            new_hparams = {"lr": current_lr / 2, "seed": entry.hparams.get("seed", 42) + 500}
+            new_hparams = {"lr": current_lr / 2, "seed": entry.hparams.get("seed", 42) + 500,
+                           "rationale": f"LLM call failed ({exc}); halved lr as fallback."}
             print(f"[sentinel] LLM nudge failed ({exc}), using halved lr={new_hparams['lr']:.2e}")
 
         _write_nudge(results_dir, agent_id, new_hparams)
+        _write_alert(results_dir, agent_id, reason,
+                     entry.hparams, new_hparams, "nudge")
         nudged[agent_id] = datetime.now(timezone.utc)
 
         _append_log(log_path, {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent_id": agent_id,
-            "failure_reason": "stale_heartbeat_nudge",
+            "failure_reason": reason,
             "failed_hparams": entry.hparams,
             "heartbeat_at_failure": hb,
             "llm_suggested_hparams": new_hparams,
+            "rationale": new_hparams.get("rationale", ""),
             "outcome": "nudge_sent",
         })
 
@@ -302,18 +346,21 @@ async def run_sentinel(
             except Exception:  # noqa: BLE001
                 continue
 
-            # ── NaN loss: kill + LLM restart (checked before status skip) ────
-            if hb.get("anomaly") == "nan_loss":
+            anomaly = hb.get("anomaly")
+
+            # ── Kill-and-restart anomalies (checked before status skip) ───────
+            # nan_loss and critic_diverged are severe enough to act on immediately.
+            if anomaly in ("nan_loss", "critic_diverged"):
                 if agent_id not in restarted:
-                    await _intervene(agent_id, "nan_loss", hb)
+                    await _intervene(agent_id, anomaly, hb)
                 else:
-                    print(f"[sentinel] {agent_id}: NaN on restart — killing permanently")
+                    print(f"[sentinel] {agent_id}: {anomaly} on restart — killing permanently")
                     await kill_training_agent(agent_id)
                     killed.add(agent_id)
                     _append_log(log_path, {
                         "timestamp": now.isoformat(),
                         "agent_id": agent_id,
-                        "failure_reason": "nan_loss_second_failure",
+                        "failure_reason": f"{anomaly}_second_failure",
                         "outcome": "killed_permanently",
                     })
                 continue
@@ -322,9 +369,22 @@ async def run_sentinel(
             if hb.get("status") in ("completed", "failed"):
                 continue
 
+            # ── Nudge-only anomalies (soft interventions) ─────────────────────
+            # plateau: nudge first; restart if still stuck after nudge
+            if anomaly == "plateau":
+                if agent_id not in nudged:
+                    await _nudge_with_llm(agent_id, hb, reason="plateau")
+                elif agent_id not in restarted:
+                    await _intervene(agent_id, "plateau_after_nudge", hb)
+
+            # entropy_collapsed and ep_length_regression: nudge only (don't kill)
+            elif anomaly in ("entropy_collapsed", "episode_length_regression"):
+                if agent_id not in nudged:
+                    await _nudge_with_llm(agent_id, hb, reason=anomaly)
+
             # ── Stale heartbeat: LLM nudge at 120 s ──────────────────────────
-            if age_s > NUDGE_THRESHOLD_S and agent_id not in nudged:
-                await _nudge_with_llm(agent_id, hb)
+            elif age_s > NUDGE_THRESHOLD_S and agent_id not in nudged:
+                await _nudge_with_llm(agent_id, hb, reason="stale_heartbeat_nudge")
 
             # ── Still stale after nudge: LLM kill + restart at 240 s ─────────
             elif age_s > KILL_THRESHOLD_S and agent_id in nudged:

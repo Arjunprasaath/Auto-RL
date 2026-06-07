@@ -1,8 +1,10 @@
 """Env creation helpers shared by all training scripts and the renderer.
 
-Handles two special cases:
+Handles special cases:
   - Tuple obs spaces (Blackjack-v1): wrapped with FlattenObservation → Box
   - Image obs spaces (CarRacing-v3): auto-promotes MlpPolicy → CnnPolicy
+  - WorldModel-v0: creates WorldModelEnv from WORLD_MODEL_CHECKPOINT /
+    WORLD_MODEL_META environment variables (set by training_agent.py)
 
 Both training (no render_mode) and inference (render_mode="rgb_array") use
 the same wrapper stack so observations match the saved model's expectation.
@@ -10,9 +12,30 @@ the same wrapper stack so observations match the saved model's expectation.
 
 from __future__ import annotations
 
+import os
+
 import gymnasium
 from gymnasium import spaces
 from gymnasium.wrappers import FlattenObservation
+
+_WORLD_MODEL_ENV_ID = "WorldModel-v0"
+
+
+def _make_world_model_env() -> gymnasium.Env:
+    """Instantiate WorldModelEnv from env-var paths set by training_agent.py."""
+    checkpoint = os.environ.get("WORLD_MODEL_CHECKPOINT", "")
+    meta_path  = os.environ.get("WORLD_MODEL_META", "")
+    if not checkpoint or not meta_path:
+        raise RuntimeError(
+            "WorldModel-v0 requires WORLD_MODEL_CHECKPOINT and WORLD_MODEL_META "
+            "environment variables to be set."
+        )
+    # Lazy imports — only needed when actually using the world model
+    from agents.dataset_inspector_agent import DatasetMeta
+    from training.world_model_env import WorldModelEnv
+
+    meta = DatasetMeta.model_validate_json(open(meta_path).read())
+    return WorldModelEnv(checkpoint, meta)
 
 
 def make_env(env_id: str, render_mode: str | None = None) -> gymnasium.Env:
@@ -23,6 +46,9 @@ def make_env(env_id: str, render_mode: str | None = None) -> gymnasium.Env:
         render_mode: Passed to ``gymnasium.make`` (use ``"rgb_array"`` for
             video rendering, ``None`` for training).
     """
+    if env_id == _WORLD_MODEL_ENV_ID:
+        return _make_world_model_env()
+
     kwargs: dict = {}
     if render_mode is not None:
         kwargs["render_mode"] = render_mode

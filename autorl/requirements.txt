@@ -13,8 +13,11 @@ anthropic
 pydantic>=2.0
 fastapi
 uvicorn[standard]
+python-multipart    # file upload support for FastAPI (POST /api/upload-dataset)
 copilotkit          # CopilotKit Python SDK — used by ui/agent/middleware.py
 python-dotenv
+pandas>=2.0         # dataset loading (CSV / parquet) for world-model pipeline
+huggingface_hub     # HuggingFace dataset browser / file downloads
 
 # --- UI: Next.js frontend (Node.js ≥20 required) ---
 # The UI lives in autorl/ui/ and is a separate npm project.

@@ -6,6 +6,7 @@ Manages the lifecycle of individual training agent processes:
   - restart_training_agent  kill then re-launch with new hparams
 
 Local algo scripts (PPO, SAC, A2C) live in training/train_{algo}.py.
+WORLD_MODEL uses training/train_world_model.py.
 Remote GRPO execution is handled via pod_manager.runpod_agent.
 """
 
@@ -26,10 +27,31 @@ from orchestrator.device import resolve_sb3_device, subprocess_env
 from orchestrator.orchestrator_agent import EvalResult, SpawnPlanEntry
 
 PROCESSES: dict[str, asyncio.subprocess.Process] = {}
-_LOCAL_ALGOS = frozenset({"PPO", "SAC", "A2C"})
+_LOCAL_ALGOS = frozenset({"PPO", "SAC", "A2C", "WORLD_MODEL"})
 
 
 # ─── Command builders ─────────────────────────────────────────────────────────
+
+
+def _world_model_cmd(entry: SpawnPlanEntry, results_dir: str, hp: dict | None = None) -> list[str]:
+    """Build command for the world-model training script."""
+    h = {**entry.hparams, **(hp or {})}
+    cmd = [
+        sys.executable, os.path.join("training", "train_world_model.py"),
+        "--agent-id",     entry.id,
+        "--dataset-path", h["dataset_path"],
+        "--meta-path",    h["meta_path"],
+        "--results-dir",  results_dir,
+        "--time-budget",  str(entry.time_budget_min * 60),
+    ]
+    # Pass planner-recommended architecture if present
+    if "hidden_sizes" in h:
+        cmd += ["--hidden-sizes"] + [str(s) for s in h["hidden_sizes"]]
+    if "activation" in h:
+        cmd += ["--activation", str(h["activation"])]
+    if "dropout" in h:
+        cmd += ["--dropout", str(h["dropout"])]
+    return cmd
 
 
 def _cmd(entry: SpawnPlanEntry, results_dir: str, hp: dict | None = None) -> list[str]:
@@ -93,15 +115,31 @@ async def run_training_agent(
     os.makedirs(os.path.join(results_dir, entry.id), exist_ok=True)
 
     if entry.exec == "local":
-        if entry.algo.upper() not in _LOCAL_ALGOS:
+        algo = entry.algo.upper()
+        if algo not in _LOCAL_ALGOS:
             raise ValueError(f"{entry.id}: no local script for algo {entry.algo}")
-        cmd = _cmd(entry, results_dir, hparams_override)
+
+        if algo == "WORLD_MODEL":
+            cmd = _world_model_cmd(entry, results_dir, hparams_override)
+        else:
+            cmd = _cmd(entry, results_dir, hparams_override)
+
         print(
             f"[{entry.id}] launch (device={resolve_sb3_device()}): "
             f"{' '.join(cmd[1:])}"
         )
+
+        # Pass world-model checkpoint paths as env vars so env_utils.make_env can load them
+        h = {**entry.hparams, **(hparams_override or {})}
+        extra_env: dict[str, str] = {}
+        if "wm_checkpoint" in h:
+            extra_env["WORLD_MODEL_CHECKPOINT"] = str(h["wm_checkpoint"])
+        if "wm_meta" in h:
+            extra_env["WORLD_MODEL_META"] = str(h["wm_meta"])
+        proc_env = {**subprocess_env(), **extra_env}
+
         proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=_PKG_ROOT, env=subprocess_env()
+            *cmd, cwd=_PKG_ROOT, env=proc_env
         )
         PROCESSES[entry.id] = proc
         try:

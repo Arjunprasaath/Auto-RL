@@ -33,12 +33,39 @@ interface EvalResult {
   mean_return: number; std_return: number; checkpoint_path: string;
 }
 interface HistPt { steps: number; reward: number; seg: number; }
-type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error";
+type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error" | "wm_training" | "reward_design";
 type AnimState = "vanish" | "appear" | "idle";
+
+interface DatasetMeta {
+  obs_cols: string[]; act_cols: string[]; reward_col: string;
+  next_obs_cols: string[]; done_col: string;
+  obs_dim: number; act_dim: number;
+  act_type: "discrete" | "continuous"; act_n: number | null;
+  reward_min: number; reward_max: number;
+  n_samples: number; hidden_sizes: number[];
+  dataset_path: string; initial_states_path: string;
+  source_env?: string;        // real gym env id inferred from HF config (e.g. "Ant-v5")
+  _size_reasoning?: string;   // from dataset_size_agent
+  _split_used?: string;
+}
+
+interface AgentLogEntry {
+  agent: string;       // "dataset_size" | "arch_search" | "algo_selector" | "hparam"
+  decision: string;    // short one-liner
+  reasoning: string;   // longer explanation
+  timestamp: number;
+}
+
+interface RewardMsg {
+  role: "user" | "assistant";
+  text: string;
+  code?: string;
+  explanation?: string;
+}
 
 // ── Env-family detection ───────────────────────────────────────────────────────
 
-type EnvFamily = "mujoco" | "classic" | "toytext" | "box2d" | "atari" | "grpo";
+type EnvFamily = "mujoco" | "classic" | "toytext" | "box2d" | "atari" | "grpo" | "worldmodel";
 
 const ATARI_KEYWORDS = [
   "pong","breakout","spaceinvaders","asteroids","qbert","montezuma","mspacman",
@@ -53,6 +80,7 @@ const ATARI_KEYWORDS = [
 
 function detectEnvFamily(env: string): EnvFamily {
   if (env === "Countdown") return "grpo";
+  if (env === "WorldModel-v0") return "worldmodel";
   const e = env.toLowerCase();
   if (["frozenlake", "taxi", "cliffwalking", "blackjack"].some(k => e.includes(k))) return "toytext";
   if (["lunarlander", "bipedalwalker", "carracing"].some(k => e.includes(k))) return "box2d";
@@ -103,15 +131,21 @@ const ENV_FAMILY_META: Record<EnvFamily, {
     desc: "LLM arithmetic reasoning task (no video)",
     inferLabel: "",          episodeNote: "",
   },
+  worldmodel: {
+    label: "World Model", icon: "🧠", fps: "—",      color: "text-teal-400",
+    desc: "Custom dataset — agents train inside a learned simulator",
+    inferLabel: "",          episodeNote: "",
+  },
 };
 
 // ── Style maps ─────────────────────────────────────────────────────────────────
 
 const ALGO_STYLE: Record<string, { border: string; badge: string; bar: string; rgb: string }> = {
-  PPO:  { border: "border-violet-600",  badge: "bg-violet-900 text-violet-300",  bar: "bg-violet-500",  rgb: "#8b5cf6" },
-  SAC:  { border: "border-cyan-600",    badge: "bg-cyan-900 text-cyan-300",      bar: "bg-cyan-500",    rgb: "#06b6d4" },
-  A2C:  { border: "border-pink-600",    badge: "bg-pink-900 text-pink-300",      bar: "bg-pink-500",    rgb: "#ec4899" },
-  GRPO: { border: "border-orange-600",  badge: "bg-orange-900 text-orange-300",  bar: "bg-orange-500",  rgb: "#f97316" },
+  PPO:         { border: "border-violet-600",  badge: "bg-violet-900 text-violet-300",  bar: "bg-violet-500",  rgb: "#8b5cf6" },
+  SAC:         { border: "border-cyan-600",    badge: "bg-cyan-900 text-cyan-300",      bar: "bg-cyan-500",    rgb: "#06b6d4" },
+  A2C:         { border: "border-pink-600",    badge: "bg-pink-900 text-pink-300",      bar: "bg-pink-500",    rgb: "#ec4899" },
+  GRPO:        { border: "border-orange-600",  badge: "bg-orange-900 text-orange-300",  bar: "bg-orange-500",  rgb: "#f97316" },
+  WORLD_MODEL: { border: "border-teal-600",    badge: "bg-teal-900 text-teal-300",      bar: "bg-teal-500",    rgb: "#14b8a6" },
 };
 const DEF_STYLE = { border: "border-gray-700", badge: "bg-gray-800 text-gray-300", bar: "bg-gray-500", rgb: "#6b7280" };
 const as = (algo: string) => ALGO_STYLE[algo] ?? DEF_STYLE;
@@ -495,6 +529,8 @@ const ENV_SCALE_NOTE: Record<string, string> = {
   "ALE/BeamRider-v5":      "max ~6 000",
   "ALE/Asteroids-v5":      "max ~10 000",
   "ALE/Freeway-v5":        "max 30",
+  // World Model (custom dataset)
+  "WorldModel-v0":         "reward scale depends on your dataset",
 };
 
 function Leaderboard({
@@ -722,9 +758,29 @@ export default function HomePage() {
   const [videos,      setVideos]      = useState<Record<string, string>>({});
   const [videoModal,  setVideoModal]  = useState<{ agentId: string; url: string; envId: string; envFamily: EnvFamily } | null>(null);
 
+  // ── Dataset / World-Model mode ────────────────────────────────────────────
+  const [mode,         setMode]         = useState<"gym" | "dataset">("gym");
+  const [datasetMeta,  setDatasetMeta]  = useState<DatasetMeta | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<"idle" | "uploading" | "done" | "error">("idle");
+  const [hfInput,      setHfInput]      = useState("");
+  const [wmStatus,     setWmStatus]     = useState<string | null>(null);
+  const [agentLog,     setAgentLog]     = useState<AgentLogEntry[]>([]);
+
+  // WM trainer live heartbeat (epoch, val_loss, total_epochs)
+  const [wmHeartbeat, setWmHeartbeat] = useState<Record<string, number | null>>({});
+
+  // Reward design chat state
+  const [rewardMsgs,    setRewardMsgs]    = useState<RewardMsg[]>([]);
+  const [rewardCode,    setRewardCode]    = useState<string>("");
+  const [rewardInput,   setRewardInput]   = useState<string>("");
+  const [rewardBusy,    setRewardBusy]    = useState<boolean>(false);
+  const [rewardApplying, setRewardApplying] = useState<boolean>(false);
+  const rewardChatRef = useRef<HTMLDivElement>(null);
+
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
   const textareaRef       = useRef<HTMLTextAreaElement>(null);
+  const autoRendered      = useRef<boolean>(false);
 
   // ── Polling ──────────────────────────────────────────────────────────────────
 
@@ -773,6 +829,17 @@ export default function HomePage() {
           return next;
         });
 
+        // World-model pipeline: wm_status goes planning → training → done, then status → running
+        if (data.wm_status) setWmStatus(data.wm_status);
+        if (data.agent_log?.length) setAgentLog(data.agent_log);
+        if (data.wm_heartbeat) setWmHeartbeat(data.wm_heartbeat);
+        // Keep wm_training phase active during RL racing so users see the full pipeline;
+        // only regular gym runs transition to "racing".
+        if (data.status === "running" || data.status === "racing") {
+          setPhase(p => p === "wm_training" ? "wm_training" : "racing");
+          if (data.plan?.length) setPlan(prev => data.plan.length > prev.length ? data.plan : prev);
+        }
+
         if (data.status === "completed" || data.status === "failed") {
           clearInterval(pollRef.current!);
           const rRes = await fetch(`${BACKEND}/api/results/${name}`);
@@ -780,6 +847,13 @@ export default function HomePage() {
             const rData = await rRes.json();
             setResults(rData.results ?? []);
             setBest(rData.best ?? null);
+            // Auto-render best agent once on completion
+            const bestAgent = rData.best;
+            if (bestAgent && !autoRendered.current) {
+              autoRendered.current = true;
+              // Small delay so the Done phase renders first
+              setTimeout(() => handleInfer(bestAgent.agent_id, name, rData.plan ?? []), 800);
+            }
           }
           setPhase("done");
         }
@@ -818,27 +892,142 @@ export default function HomePage() {
     } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); setPhase("error"); }
   };
 
-  const handleInfer = async (agentId: string) => {
-    setInferring(p => ({ ...p, [agentId]: true }));
-    const entry = plan.find(e => e.id === agentId);
-    const envId    = entry?.env ?? "";
+  const handleInfer = async (agentId: string, _runName?: string, _plan?: SpawnEntry[], envOverride?: string) => {
+    const rn    = _runName ?? runName;
+    const pl    = _plan    ?? plan;
+    const inferKey = envOverride ? `${agentId}_real` : agentId;
+    setInferring(p => ({ ...p, [inferKey]: true }));
+    const entry    = pl.find(e => e.id === agentId);
+    const envId    = envOverride ?? entry?.env ?? "";
     const envFamily = detectEnvFamily(envId);
     try {
       const res = await fetch(`${BACKEND}/api/infer`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_name: runName, agent_id: agentId }),
+        body: JSON.stringify({ run_name: rn, agent_id: agentId, env_override: envOverride ?? null }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(err.detail ?? res.statusText);
       }
       const data = await res.json();
-      setVideoModal({ agentId, url: `${BACKEND}/api/video/${data.filename}`, envId, envFamily });
+      const videoUrl = `${BACKEND}/api/video/${data.filename}`;
+      setVideos(v => ({ ...v, [inferKey]: videoUrl }));
+      setVideoModal({ agentId, url: videoUrl, envId, envFamily });
     } catch (e) {
       alert(`Inference failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setInferring(p => ({ ...p, [agentId]: false }));
+      setInferring(p => ({ ...p, [inferKey]: false }));
     }
+  };
+
+  const handleUploadDataset = async (file: File) => {
+    setUploadStatus("uploading"); setErrorMsg("");
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const res = await fetch(`${BACKEND}/api/upload-dataset`, { method: "POST", body: form });
+      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail ?? res.statusText); }
+      setDatasetMeta(await res.json()); setUploadStatus("done");
+    } catch (e) { setUploadStatus("error"); setErrorMsg(e instanceof Error ? e.message : String(e)); }
+  };
+
+  const handleHFDataset = async () => {
+    if (!hfInput.trim()) return;
+    setUploadStatus("uploading"); setErrorMsg("");
+    try {
+      // Support "owner/dataset:config_name" syntax
+      const raw = hfInput.trim();
+      const colonIdx = raw.lastIndexOf(":");
+      const slashIdx = raw.indexOf("/");
+      // Only treat colon as config separator when it comes after the slash
+      const hasConfig = colonIdx > slashIdx && colonIdx !== -1;
+      const dataset_name = hasConfig ? raw.slice(0, colonIdx) : raw;
+      const config_name  = hasConfig ? raw.slice(colonIdx + 1) : undefined;
+      const res = await fetch(`${BACKEND}/api/hf-dataset`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset_name, config_name }),
+      });
+      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail ?? res.statusText); }
+      setDatasetMeta(await res.json()); setUploadStatus("done");
+    } catch (e) { setUploadStatus("error"); setErrorMsg(e instanceof Error ? e.message : String(e)); }
+  };
+
+  // ── Reward design helpers ────────────────────────────────────────────────────
+
+  // Build history array to send to the backend (raw LLM format)
+  const rewardHistory = (msgs: RewardMsg[]): {role: string; content: string}[] =>
+    msgs.map(m => ({
+      role: m.role,
+      content: m.role === "assistant"
+        ? JSON.stringify({ message: m.text, code: m.code ?? "", explanation: m.explanation ?? "" })
+        : m.text,
+    }));
+
+  const sendRewardMessage = async (userText: string, msgs: RewardMsg[]) => {
+    if (!datasetMeta) return;
+    setRewardBusy(true);
+    const nextMsgs: RewardMsg[] = userText
+      ? [...msgs, { role: "user", text: userText }]
+      : msgs;
+    if (userText) setRewardMsgs(nextMsgs);
+    try {
+      const res = await fetch(`${BACKEND}/api/design-reward`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meta: datasetMeta, history: rewardHistory(msgs), message: userText }),
+      });
+      if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail ?? res.statusText); }
+      const data = await res.json();
+      const updated: RewardMsg[] = [...nextMsgs, {
+        role: "assistant", text: data.message, code: data.code, explanation: data.explanation,
+      }];
+      setRewardMsgs(updated);
+      setRewardCode(data.code);
+      setTimeout(() => rewardChatRef.current?.scrollTo({ top: 99999, behavior: "smooth" }), 80);
+    } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); }
+    finally { setRewardBusy(false); }
+  };
+
+  const handleEnterRewardDesign = () => {
+    setPhase("reward_design");
+    setRewardMsgs([]); setRewardCode(""); setRewardInput("");
+    // Auto-fire first LLM message
+    sendRewardMessage("", []);
+  };
+
+  const handleApproveReward = async () => {
+    if (!datasetMeta || !rewardCode) return;
+    setRewardApplying(true); setErrorMsg("");
+    try {
+      // Apply reward to dataset
+      const applyRes = await fetch(`${BACKEND}/api/apply-reward`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meta: datasetMeta, reward_code: rewardCode }),
+      });
+      if (!applyRes.ok) { const e = await applyRes.json().catch(() => ({ detail: applyRes.statusText })); throw new Error(e.detail ?? applyRes.statusText); }
+      const updatedMeta = await applyRes.json();
+      setDatasetMeta(updatedMeta);
+      // Launch WM pipeline with updated meta
+      await _launchWorldModel(updatedMeta);
+    } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); setPhase("error"); }
+    finally { setRewardApplying(false); }
+  };
+
+  const _launchWorldModel = async (meta: DatasetMeta) => {
+    setPhase("wm_training"); setErrorMsg("");
+    const res = await fetch(`${BACKEND}/api/world-model-plan`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meta }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail ?? res.statusText); }
+    const data = await res.json();
+    setRunName(data.run_name); setWmStatus("planning");
+    startPolling(data.run_name);
+  };
+
+  const handleStartWorldModel = async () => {
+    if (!datasetMeta) return;
+    try { await _launchWorldModel(datasetMeta); }
+    catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); setPhase("error"); }
   };
 
   const handleReset = () => {
@@ -846,7 +1035,11 @@ export default function HomePage() {
     setPhase("idle"); setTask(""); setPlan([]); setRunName(""); setRunDir("");
     setHeartbeats([]); setSentinel([]); setResults([]); setBest(null); setErrorMsg("");
     setHistory({}); setAnimStates({}); setInferring({}); setVideos({}); setVideoModal(null);
+    setDatasetMeta(null); setUploadStatus("idle"); setHfInput(""); setWmStatus(null); setAgentLog([]);
+    setRewardMsgs([]); setRewardCode(""); setRewardInput(""); setRewardBusy(false); setRewardApplying(false);
+    setWmHeartbeat({});
     prevSentinelCount.current = {};
+    autoRendered.current = false;
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
 
@@ -879,21 +1072,127 @@ export default function HomePage() {
       {/* ── IDLE / ERROR ── */}
       {(phase === "idle" || phase === "error") && (
         <div className="w-full max-w-xl space-y-4">
-          <p className="text-center text-gray-300 text-lg font-medium">What do you want to train?</p>
-          <div className="relative">
-            <textarea ref={textareaRef} autoFocus value={task}
-              onChange={e => setTask(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGeneratePlan(); }}
-              rows={3} placeholder="Describe the RL task…"
-              className="w-full bg-gray-900 border border-gray-700 focus:border-violet-500 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-600 text-sm resize-none outline-none transition-colors" />
-            <p className="absolute bottom-2 right-3 text-xs text-gray-600">⌘ Enter</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {SUGGESTIONS.map(s => (
-              <button key={s} onClick={() => setTask(s)}
-                className="text-xs px-3 py-1.5 rounded-full bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 border border-gray-700 transition-colors">{s}</button>
+          {/* Mode toggle */}
+          <div className="flex bg-gray-900 border border-gray-800 rounded-xl p-1 gap-1">
+            {(["gym", "dataset"] as const).map(m => (
+              <button key={m} onClick={() => { setMode(m); setDatasetMeta(null); setUploadStatus("idle"); setErrorMsg(""); }}
+                className={`flex-1 text-sm font-semibold py-2 rounded-lg transition-colors
+                  ${mode === m ? "bg-violet-600 text-white" : "text-gray-400 hover:text-gray-200"}`}>
+                {m === "gym" ? "🎮 Gym Task" : "📊 Custom Dataset"}
+              </button>
             ))}
           </div>
+
+          {mode === "gym" ? (
+            <>
+              <p className="text-center text-gray-300 text-lg font-medium">What do you want to train?</p>
+              <div className="relative">
+                <textarea ref={textareaRef} autoFocus value={task}
+                  onChange={e => setTask(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGeneratePlan(); }}
+                  rows={3} placeholder="Describe the RL task…"
+                  className="w-full bg-gray-900 border border-gray-700 focus:border-violet-500 rounded-xl px-4 py-3 text-gray-100 placeholder-gray-600 text-sm resize-none outline-none transition-colors" />
+                <p className="absolute bottom-2 right-3 text-xs text-gray-600">⌘ Enter</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {SUGGESTIONS.map(s => (
+                  <button key={s} onClick={() => setTask(s)}
+                    className="text-xs px-3 py-1.5 rounded-full bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 border border-gray-700 transition-colors">{s}</button>
+                ))}
+              </div>
+              <button onClick={handleGeneratePlan} disabled={!task.trim()}
+                className="w-full bg-violet-600 hover:bg-violet-500 disabled:bg-gray-800 disabled:text-gray-600 text-white font-semibold py-3 rounded-xl transition-colors text-sm">
+                Generate Agent Lineup →
+              </button>
+            </>
+          ) : (
+            /* ── Dataset upload panel ── */
+            <div className="space-y-4">
+              <p className="text-center text-gray-300 text-lg font-medium">Upload your RL dataset</p>
+              <p className="text-xs text-gray-500 text-center">Provide transitions: (obs, action, reward, next_obs, done) — CSV, JSON, or parquet</p>
+
+              {/* File upload */}
+              <label className={`flex flex-col items-center gap-2 border-2 border-dashed rounded-xl px-4 py-6 cursor-pointer transition-colors
+                ${uploadStatus === "uploading" ? "border-violet-700 bg-violet-950/20" : "border-gray-700 hover:border-violet-600 bg-gray-900 hover:bg-gray-900/80"}`}>
+                <span className="text-3xl">📁</span>
+                <span className="text-sm text-gray-400">
+                  {uploadStatus === "uploading" ? "Inspecting…" : "Drop file here or click to browse"}
+                </span>
+                <span className="text-xs text-gray-600">CSV · JSON · JSONL · parquet</span>
+                <input type="file" className="hidden" accept=".csv,.json,.jsonl,.parquet"
+                  disabled={uploadStatus === "uploading"}
+                  onChange={e => { if (e.target.files?.[0]) handleUploadDataset(e.target.files[0]); }} />
+              </label>
+
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-gray-800" />
+                <span className="text-xs text-gray-600">or download from HuggingFace</span>
+                <div className="flex-1 h-px bg-gray-800" />
+              </div>
+
+              {/* HuggingFace input */}
+              <div className="flex gap-2">
+                <input value={hfInput} onChange={e => setHfInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") handleHFDataset(); }}
+                  placeholder="owner/dataset:config  (e.g. jat-project/jat-dataset:mujoco-ant)"
+                  className="flex-1 bg-gray-900 border border-gray-700 focus:border-violet-500 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-600 outline-none transition-colors" />
+                <button onClick={handleHFDataset} disabled={!hfInput.trim() || uploadStatus === "uploading"}
+                  className="px-4 py-2 text-sm font-semibold bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded-xl border border-gray-700 transition-colors whitespace-nowrap">
+                  {uploadStatus === "uploading" ? "⏳" : "Download"}
+                </button>
+              </div>
+
+              {/* Dataset meta preview */}
+              {datasetMeta && uploadStatus === "done" && (
+                <div className="bg-teal-950/40 border border-teal-800/50 rounded-xl p-4 space-y-3">
+                  <p className="text-sm font-semibold text-teal-300">Dataset inspected</p>
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
+                    <div className="text-gray-500">Samples</div>
+                    <div className="text-gray-200 font-mono">{datasetMeta.n_samples.toLocaleString()}</div>
+                    <div className="text-gray-500">Obs dim</div>
+                    <div className="text-gray-200 font-mono">{datasetMeta.obs_dim}</div>
+                    <div className="text-gray-500">Action</div>
+                    <div className="text-gray-200 font-mono">
+                      {datasetMeta.act_type === "discrete" ? `discrete (${datasetMeta.act_n} actions)` : `continuous (dim ${datasetMeta.act_dim})`}
+                    </div>
+                    <div className="text-gray-500">Reward range</div>
+                    <div className="text-gray-200 font-mono">{datasetMeta.reward_min.toFixed(2)} – {datasetMeta.reward_max.toFixed(2)}</div>
+                    <div className="text-gray-500">World model</div>
+                    <div className="text-gray-200 font-mono">MLP {datasetMeta.hidden_sizes.join("×")}</div>
+                    {datasetMeta._split_used && (
+                      <>
+                        <div className="text-gray-500">Split used</div>
+                        <div className="text-gray-400 font-mono text-xs">{datasetMeta._split_used}</div>
+                      </>
+                    )}
+                  </div>
+                  {datasetMeta._size_reasoning && (
+                    <div className="flex gap-2 bg-gray-900/60 rounded-lg p-2.5">
+                      <span className="text-base shrink-0">📦</span>
+                      <p className="text-xs text-gray-400 leading-relaxed">
+                        <span className="text-green-400 font-semibold">Data Sizer: </span>
+                        {datasetMeta._size_reasoning}
+                      </p>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500">
+                    Multi-agent planner will choose architecture, algorithms &amp; hyperparameters before training.
+                  </p>
+                  <div className="flex gap-2">
+                    <button onClick={handleEnterRewardDesign}
+                      className="flex-1 bg-violet-700 hover:bg-violet-600 text-white font-semibold py-2.5 rounded-xl transition-colors text-sm">
+                      ✏️ Design Reward
+                    </button>
+                    <button onClick={handleStartWorldModel}
+                      className="flex-1 bg-teal-600 hover:bg-teal-500 text-white font-semibold py-2.5 rounded-xl transition-colors text-sm">
+                      🧠 Train →
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {phase === "error" && (
             <div className="bg-red-950 border border-red-800 rounded-xl p-3 text-sm text-red-300">
               <p className="font-semibold mb-1">Error</p>
@@ -901,9 +1200,107 @@ export default function HomePage() {
               <p className="text-xs text-red-400 mt-2">Backend running? <code className="font-mono">bash ui/agent/start.sh</code></p>
             </div>
           )}
-          <button onClick={handleGeneratePlan} disabled={!task.trim()}
-            className="w-full bg-violet-600 hover:bg-violet-500 disabled:bg-gray-800 disabled:text-gray-600 text-white font-semibold py-3 rounded-xl transition-colors text-sm">
-            Generate Agent Lineup →
+        </div>
+      )}
+
+      {/* ── REWARD DESIGN ── */}
+      {phase === "reward_design" && datasetMeta && (
+        <div className="w-full max-w-2xl space-y-4">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-bold text-gray-100">Design Reward Function</h2>
+            <button onClick={() => setPhase("idle")}
+              className="text-xs text-gray-500 hover:text-gray-300 transition-colors">← Back</button>
+          </div>
+
+          {/* Dataset context chip */}
+          <div className="flex flex-wrap gap-2 text-xs">
+            {[
+              ["obs_dim", datasetMeta.obs_dim],
+              ["act", datasetMeta.act_type === "discrete" ? `discrete ×${datasetMeta.act_n}` : `continuous ×${datasetMeta.act_dim}`],
+              ["reward", `${datasetMeta.reward_min.toFixed(2)} – ${datasetMeta.reward_max.toFixed(2)}`],
+              ["samples", datasetMeta.n_samples.toLocaleString()],
+            ].map(([k, v]) => (
+              <span key={String(k)} className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-gray-400">
+                <span className="text-gray-600">{k}: </span>{v}
+              </span>
+            ))}
+          </div>
+
+          {/* Chat messages */}
+          <div ref={rewardChatRef}
+            className="bg-gray-950 border border-gray-800 rounded-xl p-4 space-y-4 max-h-80 overflow-y-auto">
+            {rewardMsgs.length === 0 && (
+              <div className="flex items-center gap-2 text-gray-600 text-sm">
+                <div className="w-4 h-4 rounded-full border border-violet-500 border-t-transparent animate-spin" />
+                Analysing dataset…
+              </div>
+            )}
+            {rewardMsgs.map((msg, i) => (
+              <div key={i} className={`flex gap-3 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
+                <div className={`shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-sm
+                  ${msg.role === "assistant" ? "bg-violet-800 text-violet-200" : "bg-gray-700 text-gray-300"}`}>
+                  {msg.role === "assistant" ? "🤖" : "You"}
+                </div>
+                <div className={`flex-1 space-y-2 ${msg.role === "user" ? "items-end" : ""}`}>
+                  <p className={`text-sm leading-relaxed rounded-xl px-3 py-2 inline-block max-w-full
+                    ${msg.role === "assistant"
+                      ? "bg-gray-900 text-gray-200 text-left"
+                      : "bg-violet-900/60 text-violet-100 text-right ml-auto"}`}>
+                    {msg.text}
+                  </p>
+                  {msg.code && (
+                    <pre className="text-xs bg-gray-900 border border-gray-700 rounded-lg p-3 overflow-x-auto
+                      text-green-300 font-mono leading-relaxed">
+                      {msg.code}
+                    </pre>
+                  )}
+                  {msg.explanation && (
+                    <p className="text-xs text-gray-500 italic">{msg.explanation}</p>
+                  )}
+                </div>
+              </div>
+            ))}
+            {rewardBusy && (
+              <div className="flex items-center gap-2 text-gray-600 text-sm">
+                <div className="w-4 h-4 rounded-full border border-violet-500 border-t-transparent animate-spin" />
+                Thinking…
+              </div>
+            )}
+          </div>
+
+          {/* Input + send */}
+          <div className="flex gap-2">
+            <input
+              value={rewardInput}
+              onChange={e => setRewardInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && !e.shiftKey && rewardInput.trim() && !rewardBusy) {
+                  const txt = rewardInput.trim();
+                  setRewardInput("");
+                  sendRewardMessage(txt, rewardMsgs);
+                }
+              }}
+              disabled={rewardBusy}
+              placeholder="Ask for changes… (e.g. add a penalty for large actions)"
+              className="flex-1 bg-gray-900 border border-gray-700 focus:border-violet-500 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-600 outline-none transition-colors disabled:opacity-40"
+            />
+            <button
+              disabled={!rewardInput.trim() || rewardBusy}
+              onClick={() => { const txt = rewardInput.trim(); setRewardInput(""); sendRewardMessage(txt, rewardMsgs); }}
+              className="px-4 py-2 text-sm font-semibold bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded-xl border border-gray-700 transition-colors">
+              Send
+            </button>
+          </div>
+
+          {/* Approve */}
+          <button
+            onClick={handleApproveReward}
+            disabled={!rewardCode || rewardBusy || rewardApplying}
+            className="w-full bg-teal-600 hover:bg-teal-500 disabled:opacity-40 text-white font-semibold py-3 rounded-xl transition-colors text-sm flex items-center justify-center gap-2">
+            {rewardApplying
+              ? <><div className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin" /> Applying reward & launching…</>
+              : "✅ Approve & Train World Model →"}
           </button>
         </div>
       )}
@@ -961,6 +1358,338 @@ export default function HomePage() {
         </div>
       )}
 
+      {/* ── WM TRAINING (planning + training phases) ── */}
+      {phase === "wm_training" && (() => {
+        const epoch       = (wmHeartbeat.steps_completed as number) ?? 0;
+        const totalEpochs = (wmHeartbeat.total_epochs   as number) ?? 200;
+        const valLoss     = (wmHeartbeat.loss            as number | null) ?? null;
+        const pct         = totalEpochs > 0 ? Math.min(100, (epoch / totalEpochs) * 100) : 0;
+        const isPlanning  = wmStatus === "planning" || (wmStatus !== "training" && wmStatus !== "done" && agentLog.length < 3);
+        const isTraining  = wmStatus === "training";
+
+        const AGENT_META: Record<string, { icon: string; label: string; color: string }> = {
+          arch_search:   { icon: "🏗️",  label: "Arch Agent",     color: "text-violet-400" },
+          algo_selector: { icon: "🎯",  label: "Algo Selector",  color: "text-blue-400"   },
+          hparam:        { icon: "⚙️",  label: "Hparam Agent",   color: "text-amber-400"  },
+          dataset_size:  { icon: "📦",  label: "Data Sizer",     color: "text-green-400"  },
+          system:        { icon: "⚡",  label: "System",         color: "text-gray-400"   },
+        };
+
+        return (
+          <div className="w-full max-w-2xl space-y-5">
+
+            {/* Header */}
+            <div className="flex items-center gap-3">
+              {best ? (
+                <div className="w-10 h-10 rounded-full bg-teal-800/60 flex items-center justify-center shrink-0 text-xl">🏆</div>
+              ) : (
+                <div className={`w-10 h-10 rounded-full border-2 shrink-0 animate-spin ${
+                  isPlanning ? "border-violet-500 border-t-transparent"
+                  : plan.length > 0 ? "border-violet-400 border-t-transparent"
+                  : "border-teal-500 border-t-transparent"
+                }`} />
+              )}
+              <div>
+                <p className="text-gray-100 font-semibold">
+                  {best ? "World Model Pipeline Complete"
+                   : isPlanning ? "Multi-Agent Planning…"
+                   : plan.length > 0 ? "RL Agents Racing in World Model…"
+                   : "Training World Model…"}
+                </p>
+                <p className="text-xs text-gray-500">
+                  {best
+                    ? `Best: ${best.agent_id} · ${best.algo} · return ${best.mean_return?.toFixed(3) ?? "—"}`
+                    : isPlanning
+                      ? "Agents are deciding architecture, algorithms & hyperparameters"
+                      : plan.length > 0
+                        ? `${plan.length} algorithms racing inside the learned simulator`
+                        : `Phase 2 of 3 — learning dynamics from ${datasetMeta?.n_samples?.toLocaleString() ?? "?"} transitions`}
+                </p>
+              </div>
+            </div>
+
+            {/* Phase indicator strip */}
+            <div className="flex gap-1 text-xs">
+              {[
+                { key: "plan",  label: "1 · Plan",             done: agentLog.length >= 3 || isTraining || plan.length > 0 },
+                { key: "train", label: "2 · Train World Model", done: wmStatus === "done" || plan.length > 0 },
+                { key: "race",  label: "3 · Race RL Agents",    done: !!best },
+              ].map(s => {
+                const active = !s.done && (
+                  (s.key === "plan"  && isPlanning)  ||
+                  (s.key === "train" && isTraining)  ||
+                  (s.key === "race"  && plan.length > 0 && !best)
+                );
+                return (
+                  <div key={s.key}
+                    className={`flex-1 rounded-lg py-1.5 text-center font-medium border transition-colors ${
+                      s.done   ? "bg-teal-900/50 border-teal-700 text-teal-300"
+                      : active ? "bg-violet-900/40 border-violet-700 text-violet-300"
+                               : "bg-gray-900 border-gray-800 text-gray-600"
+                    }`}>
+                    {s.done ? "✓ " : ""}{s.label}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Agent reasoning log */}
+            {agentLog.length > 0 && (
+              <div className="bg-gray-900/80 border border-gray-800 rounded-xl overflow-hidden">
+                <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Agent Reasoning</span>
+                  <span className="text-xs text-gray-600">{agentLog.length} decisions</span>
+                </div>
+                <div className="divide-y divide-gray-800/60 max-h-56 overflow-y-auto">
+                  {agentLog.map((entry, i) => {
+                    const m = AGENT_META[entry.agent] ?? { icon: "🤖", label: entry.agent, color: "text-gray-400" };
+                    return (
+                      <div key={i} className="px-4 py-3 group">
+                        <div className="flex items-start gap-2">
+                          <span className="text-base shrink-0">{m.icon}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <span className={`text-xs font-semibold ${m.color}`}>{m.label}</span>
+                              <span className="text-xs text-gray-600">
+                                {new Date(entry.timestamp * 1000).toLocaleTimeString()}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-200 font-medium">{entry.decision}</p>
+                            <p className="text-xs text-gray-500 mt-0.5 hidden group-hover:block leading-relaxed">
+                              {entry.reasoning}
+                            </p>
+                          </div>
+                          <span className="text-teal-500 text-xs shrink-0">✓</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {isPlanning && agentLog.length < 3 && (
+                    <div className="px-4 py-3 flex items-center gap-2">
+                      <div className="w-4 h-4 rounded-full border-2 border-violet-500 border-t-transparent animate-spin shrink-0" />
+                      <span className="text-xs text-gray-500">
+                        {agentLog.length === 0 ? "arch_search deciding architecture…"
+                         : agentLog.length === 1 ? "algo_selector choosing algorithms…"
+                         : "hparam_agent tuning hyperparameters…"}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* WM training progress (shown once training starts) */}
+            {(isTraining || wmStatus === "done") && (
+              <div className="bg-gray-900 border border-teal-800/50 rounded-xl p-4 space-y-3">
+                {/* Header row */}
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                    World Model Training
+                  </span>
+                  <span className="font-mono text-xs text-teal-300">
+                    {wmStatus === "done" ? "✓ done" : `epoch ${epoch} / ${totalEpochs}`}
+                  </span>
+                </div>
+
+                {/* Real progress bar */}
+                <div className="relative w-full bg-gray-800 rounded-full h-2 overflow-hidden">
+                  <div
+                    className="h-2 rounded-full bg-gradient-to-r from-teal-600 to-teal-400 transition-all duration-700"
+                    style={{ width: wmStatus === "done" ? "100%" : `${Math.max(pct, 2)}%` }}
+                  />
+                  {isTraining && pct < 100 && (
+                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-pulse rounded-full" />
+                  )}
+                </div>
+
+                {/* Val loss + epoch counters */}
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div>
+                    <p className="text-xs text-gray-600">Epoch</p>
+                    <p className="font-mono text-sm font-bold text-gray-200">{epoch || "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-600">Progress</p>
+                    <p className="font-mono text-sm font-bold text-teal-400">
+                      {wmStatus === "done" ? "100%" : epoch > 0 ? `${pct.toFixed(0)}%` : "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-600">Val Loss</p>
+                    <p className={`font-mono text-sm font-bold ${
+                      valLoss === null ? "text-gray-600"
+                      : valLoss < 0.1  ? "text-teal-400"
+                      : valLoss < 0.5  ? "text-yellow-400"
+                      : "text-gray-300"}`}>
+                      {valLoss !== null ? valLoss.toFixed(4) : "—"}
+                    </p>
+                  </div>
+                </div>
+
+                {datasetMeta && (
+                  <p className="text-xs text-gray-600">
+                    {datasetMeta.n_samples.toLocaleString()} transitions · obs {datasetMeta.obs_dim}D · {datasetMeta.act_type}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Phase 3 — RL agents racing inside the world model */}
+            {plan.length > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 rounded-full border border-violet-500 border-t-transparent animate-spin shrink-0" />
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                    Phase 3 · RL Agents Racing in World Model
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-2">
+                  {plan.map(entry => {
+                    const hb      = heartbeats.find(h => h.agent_id === entry.id);
+                    const vidUrl  = videos[entry.id];
+                    const isInfer = !!inferring[entry.id];
+                    const isDone  = hb?.status === "completed";
+                    return (
+                      <div key={entry.id}
+                        className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-3">
+                        <div className={`w-2 h-2 rounded-full shrink-0 ${
+                          isDone ? "bg-teal-400" : hb ? "bg-violet-400 animate-pulse" : "bg-gray-700"
+                        }`} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-gray-300">
+                            {entry.id} · <span className="text-violet-400">{entry.algo}</span>
+                          </p>
+                          {hb ? (
+                            <p className="text-xs text-gray-500 font-mono">
+                              reward {hb.current_reward.toFixed(3)}
+                              {hb.loss !== null && hb.loss !== undefined ? `  loss ${(hb.loss as number).toFixed(3)}` : ""}
+                            </p>
+                          ) : (
+                            <p className="text-xs text-gray-600">waiting…</p>
+                          )}
+                        </div>
+                        {/* Render buttons */}
+                        <div className="flex flex-col items-end gap-1 shrink-0">
+                          {/* World model trajectory render */}
+                          {vidUrl ? (
+                            <button onClick={() => {
+                              const envFamily = detectEnvFamily(entry.env);
+                              setVideoModal({ agentId: entry.id, url: vidUrl, envId: entry.env, envFamily });
+                            }}
+                              className="text-xs text-teal-400 hover:text-teal-300 font-semibold transition-colors">
+                              ▶ watch
+                            </button>
+                          ) : (isDone || hb) ? (
+                            <button onClick={() => handleInfer(entry.id)} disabled={isInfer}
+                              className="text-xs text-gray-500 hover:text-violet-400 disabled:opacity-40 font-semibold transition-colors">
+                              {isInfer ? "⏳" : "▶ WM plot"}
+                            </button>
+                          ) : null}
+                          {/* Real env render — only when source_env is known */}
+                          {(isDone || hb) && datasetMeta?.source_env && (() => {
+                            const realKey = `${entry.id}_real`;
+                            const realVid = videos[realKey];
+                            const isRealInfer = !!inferring[realKey];
+                            return realVid ? (
+                              <button onClick={() => {
+                                const ef = detectEnvFamily(datasetMeta.source_env!);
+                                setVideoModal({ agentId: entry.id, url: realVid, envId: datasetMeta.source_env!, envFamily: ef });
+                              }}
+                                className="text-xs text-amber-400 hover:text-amber-300 font-semibold transition-colors">
+                                🦾 watch real
+                              </button>
+                            ) : (
+                              <button onClick={() => handleInfer(entry.id, undefined, undefined, datasetMeta.source_env)}
+                                disabled={isRealInfer}
+                                className="text-xs text-gray-600 hover:text-amber-400 disabled:opacity-40 font-semibold transition-colors">
+                                {isRealInfer ? "⏳" : `🦾 ${datasetMeta.source_env}`}
+                              </button>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Pre-race hint when plan not yet available */}
+            {plan.length === 0 && agentLog.length >= 3 && (
+              <p className="text-xs text-gray-600 text-center">
+                Phase 3 will race{" "}
+                {agentLog.find(e => e.agent === "algo_selector")?.decision?.replace("Competing: ", "") ?? "PPO / SAC / A2C"}{" "}
+                inside the world model once training converges.
+              </p>
+            )}
+
+            {/* ── Pipeline complete — best agent summary ── */}
+            {best && (
+              <div className="bg-teal-950/40 border border-teal-700/50 rounded-xl p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-teal-400 text-lg">🏆</span>
+                  <p className="text-sm font-bold text-teal-300">Pipeline Complete</p>
+                </div>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+                  <span className="text-gray-500">Best agent</span>
+                  <span className="font-mono text-gray-200">{best.agent_id} · {best.algo}</span>
+                  <span className="text-gray-500">Mean return</span>
+                  <span className="font-mono text-teal-400 font-bold">{best.mean_return?.toFixed(3) ?? "—"}</span>
+                </div>
+                <div className="flex gap-2">
+                  {/* World model trajectory video */}
+                  {videos[best.agent_id] ? (
+                    <button onClick={() => {
+                      const envFamily = detectEnvFamily(best.env ?? "WorldModel-v0");
+                      setVideoModal({ agentId: best.agent_id, url: videos[best.agent_id], envId: best.env ?? "WorldModel-v0", envFamily });
+                    }}
+                      className="flex-1 bg-teal-700 hover:bg-teal-600 text-white text-sm font-semibold py-2 rounded-xl transition-colors">
+                      ▶ Watch WM Plot
+                    </button>
+                  ) : (
+                    <button onClick={() => handleInfer(best.agent_id)}
+                      disabled={!!inferring[best.agent_id]}
+                      className="flex-1 bg-teal-700 hover:bg-teal-600 disabled:opacity-40 text-white text-sm font-semibold py-2 rounded-xl transition-colors flex items-center justify-center gap-2">
+                      {inferring[best.agent_id]
+                        ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> Rendering…</>
+                        : "▶ WM Plot"}
+                    </button>
+                  )}
+                  {/* Real env video — only when source env is known */}
+                  {datasetMeta?.source_env && (() => {
+                    const realKey = `${best.agent_id}_real`;
+                    const realVid = videos[realKey];
+                    const isRI    = !!inferring[realKey];
+                    return realVid ? (
+                      <button onClick={() => {
+                        const ef = detectEnvFamily(datasetMeta.source_env!);
+                        setVideoModal({ agentId: best.agent_id, url: realVid, envId: datasetMeta.source_env!, envFamily: ef });
+                      }}
+                        className="flex-1 bg-amber-700 hover:bg-amber-600 text-white text-sm font-semibold py-2 rounded-xl transition-colors">
+                        🦾 Watch Real
+                      </button>
+                    ) : (
+                      <button onClick={() => handleInfer(best.agent_id, undefined, undefined, datasetMeta.source_env)}
+                        disabled={isRI}
+                        className="flex-1 bg-amber-800/70 hover:bg-amber-700 disabled:opacity-40 text-amber-200 text-sm font-semibold py-2 rounded-xl transition-colors flex items-center justify-center gap-2">
+                        {isRI
+                          ? <><div className="w-4 h-4 border-2 border-amber-200 border-t-transparent rounded-full animate-spin" /> Rendering…</>
+                          : `🦾 ${datasetMeta.source_env}`}
+                      </button>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
+
+            <button onClick={handleReset}
+              className="text-xs text-gray-600 hover:text-gray-400 underline mx-auto block transition-colors">
+              {best ? "← Start new run" : "Cancel"}
+            </button>
+          </div>
+        );
+      })()}
+
       {/* ── RACING — two-panel layout ── */}
       {phase === "racing" && (
         <div className="w-full max-w-7xl">
@@ -980,7 +1709,12 @@ export default function HomePage() {
               </button>
             </div>
           </div>
-          <p className="text-xs text-gray-500 italic mb-5">&ldquo;{task}&rdquo;</p>
+          {task && <p className="text-xs text-gray-500 italic mb-5">&ldquo;{task}&rdquo;</p>}
+          {!task && datasetMeta && (
+            <p className="text-xs text-gray-500 mb-5">
+              🧠 World model trained on {datasetMeta.n_samples.toLocaleString()} samples — agents racing inside the learned simulator
+            </p>
+          )}
 
           <div className="flex gap-5 items-start">
             {/* LEFT: scrollable agent cascade */}

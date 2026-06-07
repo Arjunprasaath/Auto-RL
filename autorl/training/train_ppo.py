@@ -68,7 +68,11 @@ def main():
             model.learn(CHUNK, callback=callback, reset_num_timesteps=False, tb_log_name=ALGO)
             steps += CHUNK
             current_reward = cb.ep_returns[-1] if cb.ep_returns else 0.0
-            hb.update(steps, current_reward)
+            m = cb.get_sb3_metrics()
+            hb.update(steps, current_reward,
+                      explained_variance=m.get("explained_variance"),
+                      entropy_loss=m.get("entropy_loss"),
+                      ep_lengths=cb.ep_lengths)
             nudge = hb.check_nudge()
             if nudge:
                 model.policy.optimizer.param_groups[0]["lr"] = nudge.get("lr", a.lr)
