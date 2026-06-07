@@ -10,6 +10,7 @@ const SUGGESTIONS = [
   "Race PPO vs SAC on HalfCheetah-v5",
   "Train an agent on Hopper-v5",
   "Train a Countdown reasoning agent with GRPO",
+  "Race PPO and A2C on ALE/Pong-v5",
 ];
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -35,6 +36,75 @@ interface HistPt { steps: number; reward: number; seg: number; }
 type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error";
 type AnimState = "vanish" | "appear" | "idle";
 
+// ── Env-family detection ───────────────────────────────────────────────────────
+
+type EnvFamily = "mujoco" | "classic" | "toytext" | "box2d" | "atari" | "grpo";
+
+const ATARI_KEYWORDS = [
+  "pong","breakout","spaceinvaders","asteroids","qbert","montezuma","mspacman",
+  "beamrider","enduro","pitfall","venture","videopinball","atlantis","assault",
+  "alien","amidar","kangaroo","krull","battlezone","berzerk","centipede",
+  "choppercommand","crazyclimber","defender","demonattack","doubledunk",
+  "fishingderby","freeway","frostbite","gopher","gravitar","hero","icehockey",
+  "jamesbond","nameThisGame","phoenix","privateeye","roadrunner","robotank",
+  "seaquest","skiing","solaris","stargunner","tennis","timepilot","tutankham",
+  "upndown","wizard",
+];
+
+function detectEnvFamily(env: string): EnvFamily {
+  if (env === "Countdown") return "grpo";
+  const e = env.toLowerCase();
+  if (["frozenlake", "taxi", "cliffwalking", "blackjack"].some(k => e.includes(k))) return "toytext";
+  if (["lunarlander", "bipedalwalker", "carracing"].some(k => e.includes(k))) return "box2d";
+  if (["halfcheetah", "hopper", "ant", "walker2d", "swimmer", "humanoid",
+       "reacher", "pusher", "invertedpendulum"].some(k => e.includes(k))) return "mujoco";
+  if (e.startsWith("ale/") || ATARI_KEYWORDS.some(k => e.includes(k))) return "atari";
+  return "classic";
+}
+
+/** FrozenLake and Blackjack have binary 0/1 (or +1/−1) outcomes — show success-rate bar.
+ *  Taxi (−200..+8) and CliffWalking (always negative) are NOT binary; use line chart. */
+function isBinaryRewardEnv(env: string): boolean {
+  const e = env.toLowerCase();
+  return ["frozenlake", "blackjack"].some(k => e.includes(k));
+}
+
+const ENV_FAMILY_META: Record<EnvFamily, {
+  label: string; icon: string; fps: string; color: string;
+  desc: string; inferLabel: string; episodeNote: string;
+}> = {
+  mujoco:  {
+    label: "MuJoCo",      icon: "🤖", fps: "30 fps", color: "text-violet-400",
+    desc: "Continuous control — physics simulation",
+    inferLabel: "▶ watch",   episodeNote: "1 deterministic episode",
+  },
+  classic: {
+    label: "Classic",     icon: "🎮", fps: "30 fps", color: "text-cyan-400",
+    desc: "Classic control task",
+    inferLabel: "▶ run",     episodeNote: "3 deterministic episodes",
+  },
+  toytext: {
+    label: "Grid World",  icon: "🧩", fps: "4 fps",  color: "text-emerald-400",
+    desc: "Discrete grid world — 4 fps, each frame = one move",
+    inferLabel: "▶ replay",  episodeNote: "5 complete episodes",
+  },
+  box2d:   {
+    label: "Box2D",       icon: "🚀", fps: "30 fps", color: "text-orange-400",
+    desc: "Physics-based 2D simulation",
+    inferLabel: "▶ fly",     episodeNote: "2 complete episodes",
+  },
+  atari:   {
+    label: "Atari",       icon: "👾", fps: "30 fps", color: "text-red-400",
+    desc: "Arcade pixel game — CNN policy, discrete actions",
+    inferLabel: "▶ play",   episodeNote: "2 game episodes",
+  },
+  grpo:    {
+    label: "Countdown",   icon: "🔢", fps: "—",      color: "text-yellow-400",
+    desc: "LLM arithmetic reasoning task (no video)",
+    inferLabel: "",          episodeNote: "",
+  },
+};
+
 // ── Style maps ─────────────────────────────────────────────────────────────────
 
 const ALGO_STYLE: Record<string, { border: string; badge: string; bar: string; rgb: string }> = {
@@ -49,8 +119,34 @@ const SEG_COLORS = ["#8b5cf6", "#06b6d4", "#34d399", "#fbbf24", "#f472b6"];
 
 // ── Mini SVG reward chart ──────────────────────────────────────────────────────
 
-function MiniChart({ history, algoRgb, hasNaN }: { history: HistPt[]; algoRgb: string; hasNaN: boolean }) {
+function MiniChart({
+  history, algoRgb, hasNaN, family, env,
+}: {
+  history: HistPt[]; algoRgb: string; hasNaN: boolean; family: EnvFamily; env: string;
+}) {
   const W = 360, H = 72;
+
+  // Binary-outcome toy-text envs (FrozenLake): show success-rate bar.
+  // Taxi / CliffWalking have continuous/non-binary rewards — use the line chart instead.
+  if (family === "toytext" && isBinaryRewardEnv(env)) {
+    const label = "Success rate";
+    const successes = history.filter(p => p.reward > 0).length;
+    const rate = history.length > 0 ? successes / history.length : 0;
+    return (
+      <div className="w-full h-[72px] flex flex-col justify-center gap-2 px-1">
+        <div className="flex justify-between text-xs">
+          <span className="text-gray-500">{label}</span>
+          <span className="font-bold text-emerald-400">{(rate * 100).toFixed(0)}%</span>
+        </div>
+        <div className="w-full bg-gray-800 rounded-full h-2">
+          <div className="h-2 rounded-full bg-emerald-500 transition-all duration-700"
+            style={{ width: `${rate * 100}%` }} />
+        </div>
+        <p className="text-xs text-gray-600">{successes} / {history.length} polled episodes reached goal</p>
+      </div>
+    );
+  }
+
   if (history.length < 2) return (
     <div className="w-full h-[72px] flex items-center justify-center">
       <p className="text-xs text-gray-700">Waiting for data…</p>
@@ -157,11 +253,14 @@ function AgentLineupCard({ entry, index }: { entry: SpawnEntry; index: number })
   const st = as(entry.algo);
   const lr = entry.hparams.lr as number;
   const isDoom = lr >= 0.1;
+  const family = detectEnvFamily(entry.env);
+  const fmeta  = ENV_FAMILY_META[family];
   const hparams: [string, string][] = [
     ["lr", String(lr)],
     ["seed", String(entry.hparams.seed ?? "—")],
     ...(entry.hparams.n_steps != null ? [["n_steps", String(entry.hparams.n_steps)] as [string,string]] : []),
     ...(entry.hparams.gamma   != null ? [["gamma",   String(entry.hparams.gamma)]   as [string,string]] : []),
+    ...(entry.hparams.ent_coef!= null ? [["ent_coef",String(entry.hparams.ent_coef)]as [string,string]] : []),
     ...(entry.hparams.model   != null ? [["model",   String(entry.hparams.model).split("/").pop() ?? ""] as [string,string]] : []),
   ];
   return (
@@ -170,6 +269,9 @@ function AgentLineupCard({ entry, index }: { entry: SpawnEntry; index: number })
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-mono text-gray-500">#{index + 1}</span>
           <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${st.badge}`}>{entry.algo}</span>
+          <span className={`text-xs px-1.5 py-0.5 rounded-full bg-gray-800 border border-gray-700 ${fmeta.color}`}>
+            {fmeta.icon} {fmeta.label}
+          </span>
           {entry.exec === "runpod" && <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-900/60 text-yellow-400 border border-yellow-800/50">RunPod GPU</span>}
           {isDoom && <span className="text-xs px-2 py-0.5 rounded-full bg-red-900/60 text-red-400 border border-red-800/50">☠ doom bait</span>}
         </div>
@@ -189,6 +291,25 @@ function AgentLineupCard({ entry, index }: { entry: SpawnEntry; index: number })
   );
 }
 
+// ── Live agent card helpers ────────────────────────────────────────────────────
+
+function rewardLabel(family: EnvFamily, env: string): string {
+  if (family === "grpo") return "Accuracy";
+  if (family === "toytext") {
+    if (env.toLowerCase().includes("blackjack")) return "Win Rate";
+    if (isBinaryRewardEnv(env)) return "Success";
+    return "Reward";  // Taxi, CliffWalking
+  }
+  if (family === "atari") return "Score";
+  return "Reward";
+}
+
+function formatLiveReward(reward: number, family: EnvFamily, env: string): string {
+  if (family === "grpo") return `${(reward * 100).toFixed(1)}%`;
+  if (family === "toytext" && isBinaryRewardEnv(env)) return `${(reward * 100).toFixed(1)}%`;
+  return reward.toFixed(1);
+}
+
 // ── Live agent card ───────────────────────────────────────────────────────────
 
 function LiveAgentCard({
@@ -204,10 +325,18 @@ function LiveAgentCard({
   hasVideo: boolean;
 }) {
   const st = as(entry.algo);
+  const family = detectEnvFamily(entry.env);
+  const fmeta  = ENV_FAMILY_META[family];
   const hasNaN    = hb?.anomaly === "nan_loss";
   const status    = hb?.status ?? "waiting";
-  const maxSteps  = entry.time_budget_min * 60 * 100;
-  const pct       = hb ? Math.min(100, (hb.steps_completed / maxSteps) * 100) : 0;
+  // Step rate estimates: MuJoCo ~100, Box2D ~60, Toy Text ~50, Atari ~10
+  const stepsPerSec =
+    family === "toytext" ? 50 :
+    family === "box2d"   ? 60 :
+    family === "atari"   ? 10 :
+    100;
+  const maxSteps    = entry.time_budget_min * 60 * stepsPerSec;
+  const pct         = hb ? Math.min(100, (hb.steps_completed / maxSteps) * 100) : 0;
   const currentSeg = history.length > 0 ? history[history.length - 1].seg : 0;
   const latestIntervention = sentinelEntries.at(-1);
   const canInfer  = entry.algo !== "GRPO";
@@ -241,7 +370,7 @@ function LiveAgentCard({
               className={`text-xs px-2 py-0.5 rounded-lg font-semibold transition-colors
                 ${inferring ? "bg-gray-800 text-gray-500 cursor-not-allowed" :
                   "bg-gray-800 text-gray-400 hover:bg-violet-900 hover:text-violet-300 border border-gray-700"}`}>
-              {inferring ? "⏳ recording…" : "▶ infer"}
+              {inferring ? "⏳ recording…" : fmeta.inferLabel}
             </button>
           )}
           <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[status] ?? "bg-gray-800 text-gray-500"}`}>
@@ -250,7 +379,10 @@ function LiveAgentCard({
         </div>
       </div>
 
-      <p className="text-xs text-gray-500 truncate">{entry.env}</p>
+      <div className="flex items-center gap-2">
+        <p className="text-xs text-gray-500 truncate flex-1">{entry.env}</p>
+        <span className={`text-xs shrink-0 ${fmeta.color}`}>{fmeta.icon} {fmeta.label}</span>
+      </div>
 
       {latestIntervention && currentSeg > 0 && (
         <div className="bg-yellow-950/40 border border-yellow-800/40 rounded-lg px-3 py-2 text-xs">
@@ -268,9 +400,9 @@ function LiveAgentCard({
             <span className="font-mono text-gray-200">{hb.steps_completed.toLocaleString()}</span>
           </div>
           <div className="flex justify-between text-xs">
-            <span className="text-gray-400">Reward</span>
+            <span className="text-gray-400">{rewardLabel(family, entry.env)}</span>
             <span className={`font-mono font-bold ${hb.current_reward > 0 ? "text-green-400" : "text-gray-300"}`}>
-              {hb.current_reward.toFixed(1)}
+              {formatLiveReward(hb.current_reward, family, entry.env)}
             </span>
           </div>
           <div className="w-full bg-gray-800 rounded-full h-1">
@@ -288,7 +420,7 @@ function LiveAgentCard({
 
       {history.length >= 2 && (
         <div className="border-t border-gray-800 pt-2">
-          <MiniChart history={history} algoRgb={st.rgb} hasNaN={hasNaN} />
+          <MiniChart history={history} algoRgb={st.rgb} hasNaN={hasNaN} family={family} env={entry.env} />
           {currentSeg > 0 && (
             <div className="flex items-center gap-3 mt-1 text-xs text-gray-600 flex-wrap">
               {Array.from({ length: currentSeg + 1 }, (_, i) => (
@@ -308,16 +440,61 @@ function LiveAgentCard({
   );
 }
 
+// ── Live leaderboard helpers ───────────────────────────────────────────────────
+
+function formatScore(score: number, env: string): string {
+  if (score === -Infinity) return "—";
+  const family = detectEnvFamily(env);
+  if (family === "grpo") return `${(score * 100).toFixed(0)}%`;
+  if (family === "toytext" && isBinaryRewardEnv(env)) return `${(score * 100).toFixed(0)}%`;
+  if (score < 0) return score.toFixed(1);
+  return score.toFixed(0);
+}
+
 // ── Live leaderboard ──────────────────────────────────────────────────────────
 
 const ENV_SCALE_NOTE: Record<string, string> = {
-  "HalfCheetah-v5": "max ~12 000",
-  "HalfCheetah-v4": "max ~12 000",
-  "Hopper-v5":      "max ~3 500",
-  "Hopper-v4":      "max ~3 500",
-  "Ant-v5":         "max ~8 000",
-  "Walker2d-v5":    "max ~6 000",
-  "Humanoid-v5":    "max ~8 000",
+  // MuJoCo
+  "HalfCheetah-v5":         "max ~12 000",
+  "HalfCheetah-v4":         "max ~12 000",
+  "Hopper-v5":              "max ~3 500",
+  "Hopper-v4":              "max ~3 500",
+  "Ant-v5":                 "max ~8 000",
+  "Walker2d-v5":            "max ~6 000",
+  "Humanoid-v5":            "max ~8 000",
+  "HumanoidStandup-v5":     "max ~200 000",
+  "Swimmer-v5":             "max ~360",
+  "Reacher-v5":             "max ~0  (less negative = better)",
+  "Pusher-v5":              "max ~0  (less negative = better)",
+  "InvertedPendulum-v5":    "max ~1 000",
+  "InvertedDoublePendulum-v5": "max ~9 000",
+  // Classic Control
+  "CartPole-v1":              "max 500",
+  "Pendulum-v1":              "max 0  (less negative = better)",
+  "MountainCar-v0":           "max 0  (less negative = better)",
+  "MountainCarContinuous-v0": "max ~95",
+  "Acrobot-v1":               "max 0  (less negative = better)",
+  // Box2D
+  "LunarLander-v3":           "max ~300",
+  "LunarLanderContinuous-v3": "max ~300",
+  "BipedalWalker-v3":         "max ~300",
+  // Toy Text — scores shown as %
+  "FrozenLake-v1":    "success rate (0–100%)",
+  "FrozenLake8x8-v1": "success rate (0–100%)",
+  "Taxi-v3":          "max ~8  (−200 = worst; closer to +8 = better)",
+  "CliffWalking-v1":  "always negative (max −13; less negative = better)",
+  "Blackjack-v1":     "win rate (0–100%)",
+  // Atari ALE
+  "ALE/Pong-v5":           "max +21  (min −21)",
+  "ALE/Breakout-v5":       "max ~800",
+  "ALE/SpaceInvaders-v5":  "max ~10 000",
+  "ALE/MsPacman-v5":       "max ~30 000",
+  "ALE/Qbert-v5":          "max ~14 000",
+  "ALE/Enduro-v5":         "max ~1 000",
+  "ALE/Seaquest-v5":       "max ~20 000",
+  "ALE/BeamRider-v5":      "max ~6 000",
+  "ALE/Asteroids-v5":      "max ~10 000",
+  "ALE/Freeway-v5":        "max 30",
 };
 
 function Leaderboard({
@@ -397,7 +574,7 @@ function Leaderboard({
                 )}
                 <span className={`text-xs font-mono font-bold shrink-0
                   ${row.failed ? "text-red-500" : row.score > 0 ? "text-green-400" : "text-gray-400"}`}>
-                  {row.score === -Infinity ? "—" : row.score.toFixed(0)}
+                  {formatScore(row.score, row.env)}
                 </span>
               </div>
             );
@@ -443,25 +620,69 @@ function SentinelBanner({ entry }: { entry: SentinelEntry }) {
 
 // ── Video modal ───────────────────────────────────────────────────────────────
 
-function VideoModal({ url, agentId, onClose }: { url: string; agentId: string; onClose: () => void }) {
+function VideoModal({
+  url, agentId, envId, envFamily, onClose,
+}: {
+  url: string; agentId: string; envId: string; envFamily: EnvFamily; onClose: () => void;
+}) {
+  const meta = ENV_FAMILY_META[envFamily];
+  const isToyText = envFamily === "toytext";
+  const isPixelArt = envFamily === "toytext" || envFamily === "atari";
+  const isCompact   = envFamily === "toytext" || envFamily === "atari";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
       onClick={onClose}>
-      <div className="bg-gray-900 border border-gray-700 rounded-2xl p-5 max-w-2xl w-full mx-4 space-y-4"
+      <div className={`bg-gray-900 border border-gray-700 rounded-2xl p-5 w-full mx-4 space-y-4
+          ${isCompact ? "max-w-md" : "max-w-2xl"}`}
         onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
         <div className="flex items-center justify-between">
-          <div>
-            <p className="font-bold text-gray-100">Agent inference</p>
-            <p className="text-xs text-gray-500 font-mono">{agentId}</p>
+          <div className="flex items-center gap-3">
+            <span className="text-3xl">{meta.icon}</span>
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="font-bold text-gray-100">Agent inference</p>
+                <span className={`text-xs px-2 py-0.5 rounded-full bg-gray-800 border border-gray-700 ${meta.color}`}>
+                  {meta.label}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 font-mono">{agentId} · {envId}</p>
+            </div>
           </div>
           <button onClick={onClose}
             className="text-gray-500 hover:text-gray-200 text-xl leading-none">✕</button>
         </div>
+
+        {/* Stats bar */}
+        <div className="flex items-center gap-4 bg-gray-800/60 rounded-lg px-3 py-2">
+          <div className="text-center">
+            <p className="text-xs text-gray-500">Playback</p>
+            <p className={`text-sm font-bold ${meta.color}`}>{meta.fps}</p>
+          </div>
+          <div className="w-px h-8 bg-gray-700" />
+          <div className="text-center">
+            <p className="text-xs text-gray-500">Episodes</p>
+            <p className="text-sm font-bold text-gray-200">{meta.episodeNote}</p>
+          </div>
+          <div className="w-px h-8 bg-gray-700" />
+          <div className="flex-1">
+            <p className="text-xs text-gray-400">{meta.desc}</p>
+          </div>
+        </div>
+
+        {/* Video — toy text gets a smaller constrained box to keep pixels readable */}
         <video src={url} controls autoPlay loop
-          className="w-full rounded-xl bg-black max-h-[60vh] object-contain">
+          className={`w-full rounded-xl bg-black object-contain
+            ${isCompact ? "max-h-[40vh]" : "max-h-[60vh]"}`}
+          style={isPixelArt ? { imageRendering: "pixelated" } as React.CSSProperties : undefined}>
           Your browser does not support HTML video.
         </video>
-        <p className="text-xs text-gray-600">One deterministic episode recorded from the saved checkpoint.</p>
+
+        <p className="text-xs text-gray-600 text-center">
+          Deterministic policy rollout from the saved checkpoint.
+        </p>
       </div>
     </div>
   );
@@ -499,7 +720,7 @@ export default function HomePage() {
   const [animStates,  setAnimStates]  = useState<Record<string, AnimState>>({});
   const [inferring,   setInferring]   = useState<Record<string, boolean>>({});
   const [videos,      setVideos]      = useState<Record<string, string>>({});
-  const [videoModal,  setVideoModal]  = useState<{ agentId: string; url: string } | null>(null);
+  const [videoModal,  setVideoModal]  = useState<{ agentId: string; url: string; envId: string; envFamily: EnvFamily } | null>(null);
 
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -514,10 +735,13 @@ export default function HomePage() {
         const res = await fetch(`${BACKEND}/api/status/${name}`);
         if (!res.ok) return;
         const data = await res.json();
-        const hbs: Heartbeat[]      = data.heartbeats   ?? [];
-        const slog: SentinelEntry[] = data.sentinel_log ?? [];
+        const hbs: Heartbeat[]        = data.heartbeats   ?? [];
+        const slog: SentinelEntry[]   = data.sentinel_log ?? [];
+        const serverPlan: SpawnEntry[] = data.plan        ?? [];
         setHeartbeats(hbs);
         setSentinel(slog);
+        // Sync plan from server in case the UI missed agents (e.g. after server restart)
+        setPlan(prev => serverPlan.length > prev.length ? serverPlan : prev);
 
         const sentByAgent: Record<string, number> = {};
         for (const e of slog) sentByAgent[e.agent_id] = (sentByAgent[e.agent_id] ?? 0) + 1;
@@ -595,8 +819,10 @@ export default function HomePage() {
   };
 
   const handleInfer = async (agentId: string) => {
-    // Always infer fresh from the best checkpoint at this moment
     setInferring(p => ({ ...p, [agentId]: true }));
+    const entry = plan.find(e => e.id === agentId);
+    const envId    = entry?.env ?? "";
+    const envFamily = detectEnvFamily(envId);
     try {
       const res = await fetch(`${BACKEND}/api/infer`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -607,7 +833,7 @@ export default function HomePage() {
         throw new Error(err.detail ?? res.statusText);
       }
       const data = await res.json();
-      setVideoModal({ agentId, url: `${BACKEND}/api/video/${data.filename}` });
+      setVideoModal({ agentId, url: `${BACKEND}/api/video/${data.filename}`, envId, envFamily });
     } catch (e) {
       alert(`Inference failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -639,7 +865,13 @@ export default function HomePage() {
   return (
     <div className={`min-h-screen bg-gray-950 ${isCentered ? "flex flex-col items-center justify-center p-6 py-12" : "p-6 pt-8"}`}>
       {videoModal && (
-        <VideoModal url={videoModal.url} agentId={videoModal.agentId} onClose={() => setVideoModal(null)} />
+        <VideoModal
+          url={videoModal.url}
+          agentId={videoModal.agentId}
+          envId={videoModal.envId}
+          envFamily={videoModal.envFamily}
+          onClose={() => setVideoModal(null)}
+        />
       )}
 
       <Header />
@@ -817,7 +1049,9 @@ export default function HomePage() {
                     <button onClick={() => handleInfer(best.agent_id)}
                       disabled={!!inferring[best.agent_id]}
                       className="ml-auto text-xs px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-emerald-200 font-semibold transition-colors disabled:opacity-50">
-                      {inferring[best.agent_id] ? "⏳ Recording…" : "▶ Watch inference"}
+                      {inferring[best.agent_id]
+                        ? "⏳ Recording…"
+                        : `${ENV_FAMILY_META[detectEnvFamily(best.env)].icon} Watch inference`}
                     </button>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-center mb-3">

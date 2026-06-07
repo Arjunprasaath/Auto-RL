@@ -20,6 +20,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 
 from training.callbacks.heartbeat_writer import HeartbeatWriter
 from training.callbacks.weave_callback import WeaveLogCallback
+from training.env_utils import make_env, resolve_policy
 from training.wandb_setup import finish_wandb_run, start_wandb_run
 
 ALGO = "A2C"
@@ -34,7 +35,11 @@ def main():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--results-dir", default="./results")
-    p.add_argument("--device", default=os.environ.get("AUTORL_SB3_DEVICE", "cpu"))
+    p.add_argument("--device",   default=os.environ.get("AUTORL_SB3_DEVICE", "cpu"))
+    p.add_argument("--n-steps",  type=int,   default=5)
+    p.add_argument("--ent-coef", type=float, default=0.0)
+    p.add_argument("--gamma",    type=float, default=0.99)
+    p.add_argument("--policy",   type=str,   default="MlpPolicy")
     a = p.parse_args()
 
     os.makedirs(f"{a.results_dir}/{a.agent_id}", exist_ok=True)
@@ -42,7 +47,12 @@ def main():
     hb.start()
     run, tb_log, wandb_cb = start_wandb_run(a.agent_id, ALGO, a.env_id, a.lr, a.seed, a.results_dir)
 
-    model = A2C("MlpPolicy", a.env_id, learning_rate=a.lr, seed=a.seed, verbose=0,
+    env = make_env(a.env_id)
+    policy = resolve_policy(env, a.policy)
+    model = A2C(policy, env,
+                learning_rate=a.lr, n_steps=a.n_steps,
+                ent_coef=a.ent_coef, gamma=a.gamma,
+                seed=a.seed, verbose=0,
                 tensorboard_log=tb_log, device=a.device)
     cb = WeaveLogCallback(a.agent_id)
     callback = CallbackList([cb, wandb_cb]) if wandb_cb else cb

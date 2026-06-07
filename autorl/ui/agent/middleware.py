@@ -241,6 +241,54 @@ def get_results(run_name: str) -> dict:
     }
 
 
+# ── Env-family helpers ────────────────────────────────────────────────────────
+
+_ATARI_KEYWORDS = (
+    "pong", "breakout", "spaceinvaders", "asteroids", "qbert", "montezuma",
+    "mspacman", "beamrider", "enduro", "pitfall", "venture", "videopinball",
+    "atlantis", "assault", "alien", "amidar", "kangaroo", "krull", "battlezone",
+    "berzerk", "centipede", "choppercommand", "crazyclimber", "defender",
+    "demonattack", "doubledunk", "fishingderby", "freeway", "frostbite",
+    "gopher", "gravitar", "hero", "icehockey", "jamesbond", "phoenix",
+    "privateeye", "roadrunner", "robotank", "seaquest", "skiing", "solaris",
+    "stargunner", "tennis", "timepilot", "tutankham", "upndown", "wizard",
+)
+
+
+def _detect_env_family(env_id: str) -> str:
+    """Mirror of the frontend detectEnvFamily — used to pick render args."""
+    e = env_id.lower()
+    if any(k in e for k in ("frozenlake", "taxi", "cliffwalking", "blackjack")):
+        return "toytext"
+    if any(k in e for k in ("lunarlander", "bipedalwalker", "carracing")):
+        return "box2d"
+    if any(k in e for k in ("halfcheetah", "hopper", "ant", "walker2d", "swimmer",
+                             "humanoid", "reacher", "pusher", "invertedpendulum")):
+        return "mujoco"
+    if e.startswith("ale/") or any(k in e for k in _ATARI_KEYWORDS):
+        return "atari"
+    return "classic"
+
+
+def _render_extra_args(env_id: str) -> list[str]:
+    """Return family-appropriate renderer CLI args for n_steps / n_episodes."""
+    family = _detect_env_family(env_id)
+    if family == "toytext":
+        # Grid-world episodes are very short — collect 5 complete ones
+        return ["--n-episodes", "5"]
+    if family == "mujoco":
+        # One full robot episode (up to 1 000 steps = ~33 s at 30 fps)
+        return ["--n-steps", "1000", "--n-episodes", "1"]
+    if family == "box2d":
+        # Two landings / walks
+        return ["--n-steps", "800", "--n-episodes", "2"]
+    if family == "atari":
+        # Atari episodes can be long; record 2 complete games
+        return ["--n-steps", "2000", "--n-episodes", "2"]
+    # Classic Control: a few short episodes
+    return ["--n-steps", "500", "--n-episodes", "3"]
+
+
 # ── Inference endpoints ───────────────────────────────────────────────────────
 
 class InferRequest(BaseModel):
@@ -250,11 +298,14 @@ class InferRequest(BaseModel):
 
 @app.post("/api/infer")
 async def infer_agent(req: InferRequest) -> dict:
-    """Record one episode for the given agent and return the mp4 filename.
+    """Record an episode (or episodes) for the given agent and return the mp4.
 
     Runs render_mujoco.py in a *subprocess* (not a thread) so MuJoCo can
     initialise its OpenGL context on the subprocess's main thread — required
     on macOS, which forbids OpenGL from non-main threads.
+
+    The number of steps / episodes recorded is chosen automatically per
+    environment family (MuJoCo / Classic / Box2D / Grid World).
     """
     run = _runs.get(req.run_name)
     if not run:
@@ -278,6 +329,7 @@ async def infer_agent(req: InferRequest) -> dict:
 
     filename    = f"{req.agent_id}_{int(time.time())}.mp4"
     output_path = str(VIDEO_DIR / filename)
+    env_family  = _detect_env_family(env_name)
 
     render_script = str(_PKG_ROOT / "model_viewer" / "render_mujoco.py")
     proc = await asyncio.create_subprocess_exec(
@@ -286,7 +338,7 @@ async def infer_agent(req: InferRequest) -> dict:
         "--env-id",     env_name,
         "--algo",       algo,
         "--output",     output_path,
-        "--n-steps",    "1000",
+        *_render_extra_args(env_name),
         cwd=str(_PKG_ROOT),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -297,7 +349,7 @@ async def infer_agent(req: InferRequest) -> dict:
         detail = stderr.decode(errors="replace").strip().splitlines()[-1] if stderr else "render failed"
         raise HTTPException(status_code=500, detail=detail)
 
-    return {"filename": filename, "url": f"/api/video/{filename}"}
+    return {"filename": filename, "url": f"/api/video/{filename}", "env_family": env_family}
 
 
 @app.get("/api/video/{filename}")

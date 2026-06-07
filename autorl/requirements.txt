@@ -32,6 +32,8 @@ python-dotenv
 wandb
 stable-baselines3[extra]>=2.8.0
 gymnasium[mujoco]>=1.2.0
+gymnasium[box2d]>=1.2.0     # LunarLander, BipedalWalker — requires swig
+swig>=4.0.0                 # build dep for box2d
 moviepy>=1.0.3          # required by gymnasium.wrappers.RecordVideo for mp4 encoding
 mujoco>=3.9.0
 imageio[ffmpeg]>=2.37.0

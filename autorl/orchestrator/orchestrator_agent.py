@@ -101,7 +101,7 @@ Return JSON matching this schema exactly:
       "algo": "PPO",
       "env": "HalfCheetah-v5",
       "exec": "local",
-      "time_budget_min": 2,
+      "time_budget_min": 5,
       "hparams": {{ "lr": 0.0003, "gamma": 0.99, "n_steps": 2048, "ent_coef": 0.0, "seed": 42 }}
     }},
     {{
@@ -131,33 +131,52 @@ Required fields on every entry:
 
 ## Environment families
 
-### Gymnasium / Stable-Baselines3 environments (exec MUST be "local", time_budget_min: 2)
+### Gymnasium / Stable-Baselines3 environments (exec MUST be "local")
 
-Use algo "PPO", "SAC", or "A2C". Pick the env that best matches the user's task.
-You may use ANY valid Gymnasium environment id. Common ones grouped by type:
+Use algo "PPO", "SAC", or "A2C". Set time_budget_min using the per-family
+guidelines below — do NOT use a fixed value for all agents.
 
-**MuJoCo continuous control** (all algos work):
-- HalfCheetah-v5, Hopper-v5, Ant-v5, Walker2d-v5, Swimmer-v5
-- Humanoid-v5, HumanoidStandup-v5, Reacher-v5, Pusher-v5
-- InvertedPendulum-v5, InvertedDoublePendulum-v5
+**MuJoCo continuous control** — all algos work, continuous action space
+Time budgets:
+  - Simple envs (InvertedPendulum-v5, Reacher-v5, Pusher-v5, Swimmer-v5): time_budget_min=3
+  - Standard envs (HalfCheetah-v5, Hopper-v5, InvertedDoublePendulum-v5): time_budget_min=5
+  - Hard envs (Walker2d-v5, Ant-v5): time_budget_min=8
+  - Very hard envs (Humanoid-v5, HumanoidStandup-v5): time_budget_min=10
+Environments: HalfCheetah-v5, Hopper-v5, Ant-v5, Walker2d-v5, Swimmer-v5,
+  Humanoid-v5, HumanoidStandup-v5, Reacher-v5, Pusher-v5,
+  InvertedPendulum-v5, InvertedDoublePendulum-v5
 
-**Classic Control** (PPO and A2C work; SAC requires continuous action space):
-- CartPole-v1 (discrete → PPO/A2C only)
-- MountainCar-v0 (discrete → PPO/A2C only)
-- MountainCarContinuous-v0 (continuous → all algos)
-- Pendulum-v1 (continuous → all algos)
-- Acrobot-v1 (discrete → PPO/A2C only)
+**Classic Control** — built-in, no extra install required
+SAC requires continuous action space; PPO and A2C work on all.
+Time budgets:
+  - CartPole-v1, Pendulum-v1: time_budget_min=2
+  - Acrobot-v1, MountainCarContinuous-v0: time_budget_min=3
+  - MountainCar-v0 (sparse, hard exploration): time_budget_min=5
+Environments: CartPole-v1, MountainCar-v0, MountainCarContinuous-v0,
+  Pendulum-v1, Acrobot-v1
 
-**Box2D** (requires `pip install gymnasium[box2d]`):
-- LunarLander-v3 (discrete → PPO/A2C only)
-- LunarLanderContinuous-v3 (continuous → all algos)
-- BipedalWalker-v3 (continuous → all algos)
-- CarRacing-v3 (continuous, pixel obs → PPO/A2C only, use CnnPolicy)
+**Toy Text / Grid World** — built-in, no extra install required
+Discrete action and observation spaces; SAC incompatible.
+Observations are auto-wrapped as needed — MlpPolicy is fine for all.
+Time budgets:
+  - Taxi-v3, CliffWalking-v1, Blackjack-v1: time_budget_min=3
+  - FrozenLake-v1 (4×4, sparse reward): time_budget_min=5
+  - FrozenLake8x8-v1 (8×8, harder): time_budget_min=8
+Environments: FrozenLake-v1, FrozenLake8x8-v1, Taxi-v3, CliffWalking-v1, Blackjack-v1
+
+**Box2D** — only use if gymnasium[box2d] is installed; skip if unsure
+Time budgets:
+  - LunarLander-v3, LunarLanderContinuous-v3: time_budget_min=5
+  - BipedalWalker-v3 (hard): time_budget_min=8
+Environments: LunarLander-v3 (discrete → PPO/A2C only),
+  LunarLanderContinuous-v3 (continuous → all algos),
+  BipedalWalker-v3 (continuous → all algos)
 
 **IMPORTANT action-space rules:**
-- SAC ONLY supports continuous (Box) action spaces — never assign SAC to CartPole, MountainCar-v0, LunarLander-v3, Acrobot, or any other discrete env.
+- SAC ONLY supports continuous (Box) action spaces — never assign SAC to CartPole,
+  MountainCar-v0, LunarLander-v3, Acrobot-v1, FrozenLake, Taxi, or any discrete env.
 - PPO and A2C support both discrete and continuous action spaces.
-- For pixel-observation envs (CarRacing), set hparams policy="CnnPolicy"; for all others use "MlpPolicy" (default).
+- Always use policy="MlpPolicy" (the default) for all supported environments.
 
 **SB3 hparams (for any Gymnasium env):**
 - Required: lr (float, default 3e-4), gamma (float, default 0.99), seed (int, unique per algo)
@@ -241,8 +260,18 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
                 raise ValueError(f"{e.id}: Gymnasium envs need algo PPO/SAC/A2C, got {e.algo!r}")
             if e.exec != "local":
                 raise ValueError(f"{e.id}: Gymnasium/SB3 envs must use exec=local")
-            if e.time_budget_min != 2:
-                raise ValueError(f"{e.id}: Gymnasium/SB3 envs need time_budget_min=2")
+            if not (1 <= e.time_budget_min <= 30):
+                raise ValueError(f"{e.id}: time_budget_min must be 1–30, got {e.time_budget_min}")
+            # Block Box2D envs when the optional package is not installed
+            _BOX2D_KEYS = ("lunarlander", "bipedalwalker", "carracing")
+            if any(k in e.env.lower() for k in _BOX2D_KEYS):
+                try:
+                    import Box2D  # noqa: F401
+                except ImportError:
+                    raise ValueError(
+                        f"{e.id}: Box2D not installed — "
+                        "run: pip install swig && pip install 'gymnasium[box2d]'"
+                    )
         seed = e.hparams.get("seed")
         if seed is None:
             raise ValueError(f"{e.id}: hparams.seed required")

@@ -34,7 +34,7 @@ _LOCAL_ALGOS = frozenset({"PPO", "SAC", "A2C"})
 
 def _cmd(entry: SpawnPlanEntry, results_dir: str, hp: dict | None = None) -> list[str]:
     h = {**entry.hparams, **(hp or {})}
-    return [
+    cmd = [
         sys.executable, os.path.join("training", f"train_{entry.algo.lower()}.py"),
         "--agent-id", entry.id,
         "--env-id", entry.env,
@@ -44,6 +44,15 @@ def _cmd(entry: SpawnPlanEntry, results_dir: str, hp: dict | None = None) -> lis
         "--results-dir", results_dir,
         "--device", resolve_sb3_device(),
     ]
+    if "n_steps" in h:
+        cmd += ["--n-steps", str(h["n_steps"])]
+    if "ent_coef" in h:
+        cmd += ["--ent-coef", str(h["ent_coef"])]
+    if "gamma" in h:
+        cmd += ["--gamma", str(h["gamma"])]
+    if "policy" in h:
+        cmd += ["--policy", str(h["policy"])]
+    return cmd
 
 
 def _write_failed(entry: SpawnPlanEntry, results_dir: str) -> None:
