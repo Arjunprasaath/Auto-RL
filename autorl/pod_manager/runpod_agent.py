@@ -31,6 +31,7 @@ except ImportError:
 import weave
 
 from pod_manager.pod_manager import (
+    VENV_PATH,
     VENV_PYTHON,
     create_training_pod,
     get_pod_ssh_info,
@@ -102,7 +103,18 @@ def _build_train_cmd(entry: SpawnPlanEntry) -> str:
     h = entry.hparams
     time_budget_s = entry.time_budget_min * 60
 
-    env_args = ["PYTHONUNBUFFERED=1", "HF_HUB_ENABLE_HF_TRANSFER=1"]
+    # vLLM's compiled extension links against CUDA libs that pip installs under
+    # site-packages/nvidia/*/lib (e.g. libcudart.so.13 in nvidia/cu13/lib).
+    # These dirs aren't on the dynamic linker path by default, so the training
+    # process must export LD_LIBRARY_PATH or `import trl.trainer.grpo_trainer`
+    # fails with "libcudart.so.13: cannot open shared object file".
+    _nvidia_lib_glob = f"{VENV_PATH}/lib/python3.11/site-packages/nvidia/*/lib"
+    _ld_path = f"$(echo {_nvidia_lib_glob} | tr ' ' ':'):$LD_LIBRARY_PATH"
+    env_args = [
+        "PYTHONUNBUFFERED=1",
+        "HF_HUB_ENABLE_HF_TRANSFER=1",
+        f"LD_LIBRARY_PATH={_ld_path}",
+    ]
     for var in ("WANDB_API_KEY", "WEAVE_PROJECT", "WANDB_PROJECT", "OPENAI_API_KEY", "HF_TOKEN"):
         val = os.environ.get(var)
         if val:
@@ -166,7 +178,7 @@ def _poll_heartbeat(pod_id: str, agent_id: str, local_results_dir: str,
     Path(f"{local_results_dir}/{agent_id}").mkdir(parents=True, exist_ok=True)
 
     stop_log = threading.Event()
-    log_path = f"/workspace/results/{agent_id}/training.log"
+    log_path = f"/workspace/results/{agent_id}/train.log"
     proc_ref = []
     log_thread = threading.Thread(
         target=_stream_pod_log,

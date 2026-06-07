@@ -148,7 +148,7 @@ def install_dependencies(pod_id: str) -> None:
     ssh_exec(pod_id, (
         f"{VENV_PIP} install -q "
         "trl transformers peft datasets accelerate bitsandbytes "
-        "weave wandb pydantic huggingface-hub[hf_transfer]"
+        "weave wandb pydantic huggingface-hub[hf_transfer] vllm"
     ))
 
     print("[Pod] Dependencies installed.")
@@ -159,6 +159,33 @@ def verify_dependencies(pod_id: str) -> bool:
     Verify all required packages import cleanly AND that CUDA is available.
     Fails if torch can't see the GPU (which would silently run training on CPU).
     """
+# #region agent log
+    import json as _json
+    import time as _time
+    def _agent_log(hypothesis_id, location, message, data):
+        try:
+            with open("/Users/arjunprasaath/Projects/WeaveHacks_4/Auto-RL/.cursor/debug-3a8e1b.log", "a") as f:
+                f.write(_json.dumps({
+                    "sessionId": "3a8e1b",
+                    "runId": "post-fix",
+                    "hypothesisId": hypothesis_id,
+                    "location": location,
+                    "message": message,
+                    "data": data,
+                    "timestamp": int(_time.time() * 1000)
+                }) + "\n")
+        except Exception:
+            pass
+
+    # Replicates the exact LD_LIBRARY_PATH that _build_train_cmd injects.
+    _nvidia_glob = f"{VENV_PATH}/lib/python3.11/site-packages/nvidia/*/lib"
+    _ld = f"$(echo {_nvidia_glob} | tr ' ' ':'):$LD_LIBRARY_PATH"
+    try:
+        fix_import_test = ssh_exec(pod_id, f'env LD_LIBRARY_PATH={_ld} {VENV_PYTHON} -c "from trl.trainer.grpo_trainer import GRPOTrainer; print(\'GRPO_IMPORT_OK\')" 2>&1')
+        _agent_log("FIX", "pod_manager.py:verify_dependencies", "grpo import with real fix ld_path", {"output": fix_import_test})
+    except Exception as e:
+        _agent_log("FIX", "pod_manager.py:verify_dependencies", "grpo import with real fix ld_path failed", {"error": str(e)})
+# #endregion
     print("[Pod] Verifying imports and CUDA...")
     cmd = (
         f'{VENV_PYTHON} -c "'

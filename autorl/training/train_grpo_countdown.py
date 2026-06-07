@@ -120,11 +120,12 @@ def _run_inference(model, tokenizer, cases: list, agent_id: str, label: str) -> 
             {"role": "user", "content": generate_countdown_prompt(row["nums"], row["target"])},
         ]
         inputs = tokenizer.apply_chat_template(
-            msgs, return_tensors="pt", add_generation_prompt=True
+            msgs, return_tensors="pt", add_generation_prompt=True, return_dict=True
         ).to(model.device)
         with torch.no_grad():
-            out = model.generate(inputs, max_new_tokens=128, do_sample=False)
-        response = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+            out = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+        prompt_len = inputs["input_ids"].shape[1]
+        response = tokenizer.decode(out[0][prompt_len:], skip_special_tokens=True)
         score = evaluate_solution(response, row["target"], row["nums"])
         results.append({
             "numbers": row["nums"],
@@ -202,6 +203,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     _default_bs = 2 if device == "mps" else 4
     _batch_size = max(_default_bs, num_generations)
     grpo_config = GRPOConfig(
+        use_vllm=True,
         learning_rate=lr,
         per_device_train_batch_size=_batch_size,
         num_generations=num_generations,
