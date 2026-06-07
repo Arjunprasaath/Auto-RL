@@ -49,7 +49,7 @@ def evaluate_solution(model_output: str, target: int, numbers: list[int]) -> flo
 
     for expr in reversed(expressions):
         expr = expr.strip()
-        if not expr or not any(c.isdigit() for c in expr):
+        if not expr or not any(c.isdigit() for c in expr) or "**" in expr:
             continue
         try:
             result = eval(expr)  # noqa: S307 — controlled environment

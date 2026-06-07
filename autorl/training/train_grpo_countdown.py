@@ -40,7 +40,7 @@ import torch
 import weave
 from datasets import load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 from environments.countdown_env import evaluate_solution, generate_countdown_prompt, load_countdown_dataset
@@ -50,17 +50,23 @@ MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 
 
 def countdown_reward_fn(
-    completions: list[str],
+    completions: list,
     prompts: list[str],
     target: list[int],
     numbers: list[list[int]],
     **kwargs,
 ) -> list[float]:
     """Reward function passed to GRPOTrainer."""
-    return [
-        evaluate_solution(completion, t, nums)
-        for completion, t, nums in zip(completions, target, numbers)
-    ]
+    rewards = []
+    for completion, t, nums in zip(completions, target, numbers):
+        if isinstance(completion, list):
+            text = completion[-1]["content"] if completion else ""
+        elif isinstance(completion, dict):
+            text = completion.get("content", "")
+        else:
+            text = str(completion)
+        rewards.append(evaluate_solution(text, t, nums))
+    return rewards
 
 
 def init_weave(agent_id: str):
@@ -77,33 +83,54 @@ def init_weave(agent_id: str):
         print(f"[weave] init skipped ({e})")
 
 
-def init_wandb(agent_id: str, lr: float, seed: int):
-    """Start a W&B run for per-step reward/loss charts. No-op if key not set."""
-    if os.environ.get("WANDB_DISABLED") or not os.environ.get("WANDB_API_KEY"):
-        return None
-    project = os.environ.get("WEAVE_PROJECT", "autorl")
-    try:
-        import wandb
-        run = wandb.init(
-            project=project,
-            name=agent_id,
-            group="Countdown-GRPO",
-            config={"algo": "GRPO", "env": "Countdown", "lr": lr, "seed": seed},
-            reinit="finish_previous",
-        )
-        print(f"[wandb] run started: {run.url}")
-        return run
-    except Exception as e:
-        print(f"[wandb] init skipped ({e})")
-        return None
 
 
-@weave.op(name="GRPO_Countdown_Training")
-def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir, device="auto"):
+class HeartbeatTrainerCallback(TrainerCallback):
+    def __init__(self, hb: HeartbeatWriter):
+        self.hb = hb
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not state.log_history:
+            return
+        recent = state.log_history[-5:]
+        mean_reward = sum(log.get("reward", 0.0) for log in recent) / max(len(recent), 1)
+        last_loss = recent[-1].get("loss")
+        self.hb.update(state.global_step, mean_reward, loss=last_loss)
+
+
+class TimeBudgetCallback(TrainerCallback):
+    def __init__(self, start_time: float, time_budget: float):
+        self.start_time = start_time
+        self.time_budget = time_budget
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if time.time() - self.start_time >= self.time_budget:
+            control.should_training_stop = True
+        return control
+
+
+class NudgeCallback(TrainerCallback):
+    def __init__(self, hb: HeartbeatWriter, agent_id: str):
+        self.hb = hb
+        self.agent_id = agent_id
+        self._trainer = None
+
+    def set_trainer(self, trainer):
+        self._trainer = trainer
+
+    def on_step_end(self, args, state, control, **kwargs):
+        nudge = self.hb.check_nudge()
+        if nudge and self._trainer is not None:
+            new_lr = nudge.get("lr", args.learning_rate)
+            for pg in self._trainer.optimizer.param_groups:
+                pg["lr"] = new_lr
+            print(f"[{self.agent_id}] Nudged: lr={new_lr}")
+        return control
+
+
+def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir):
     """Time-budgeted GRPO training on Countdown. Traced as a Weave op."""
     os.makedirs(f"{results_dir}/{agent_id}", exist_ok=True)
-
-    wandb_run = init_wandb(agent_id, lr, seed)
 
     hb = HeartbeatWriter(agent_id, results_dir)
     hb.start()
@@ -116,7 +143,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         ).to("mps")
     else:
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, torch_dtype="auto", device_map="auto" if device == "auto" else None,
+            MODEL_NAME, torch_dtype="auto" if device == "auto" else None,
         )
         if device not in ("auto", "cpu"):
             model = model.to(device)
@@ -128,22 +155,23 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         lora_dropout=0.1,
         target_modules=["q_proj", "v_proj"],
     )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
 
     print(f"[{agent_id}] Loading dataset...")
     dataset = load_countdown_dataset(split="train", seed=seed)
     dataset = dataset.shuffle(seed=seed)
+    dataset = dataset.select(range(min(5_000, len(dataset))))  # prevent GRPOTrainer init hang
 
     def format_row(row):
         return {
-            "prompt": generate_countdown_prompt(row["nums"], row["target"]),
+            "prompt": [{"role": "user", "content": generate_countdown_prompt(row["nums"], row["target"])}],
             "target": row["target"],
             "numbers": row["nums"],
         }
 
     formatted = dataset.map(format_row, remove_columns=dataset.column_names)
 
+    _cuda_ok = torch.cuda.is_available()
+    _bf16_ok = _cuda_ok and torch.cuda.is_bf16_supported()
     grpo_config = GRPOConfig(
         learning_rate=lr,
         per_device_train_batch_size=2 if device == "mps" else 4,
@@ -154,7 +182,10 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         output_dir=f"{results_dir}/{agent_id}",
         logging_steps=1,
         save_steps=9999,  # don't auto-save; we save manually at the end
+        max_steps=10_000,  # safety ceiling; TimeBudgetCallback stops earlier
         report_to="wandb" if os.environ.get("WANDB_API_KEY") else "none",
+        bf16=_bf16_ok,
+        fp16=_cuda_ok and not _bf16_ok,
     )
 
     trainer = GRPOTrainer(
@@ -163,27 +194,22 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         processing_class=tokenizer,
         train_dataset=formatted,
         reward_funcs=countdown_reward_fn,
+        peft_config=lora_config,
     )
 
     start = time.time()
-    step = 0
 
     print(f"[{agent_id}] Starting GRPO training (budget: {time_budget}s, lr={lr})...")
-    while time.time() - start < time_budget:
-        trainer.train()
-        step += 1
+    nudge_cb = NudgeCallback(hb, agent_id)
+    trainer.add_callback(HeartbeatTrainerCallback(hb))
+    trainer.add_callback(TimeBudgetCallback(start, time_budget))
+    trainer.add_callback(nudge_cb)
+    nudge_cb.set_trainer(trainer)
+    trainer.train()
 
-        recent = trainer.state.log_history[-5:] if trainer.state.log_history else []
-        mean_reward = sum(log.get("reward", 0) for log in recent) / max(len(recent), 1)
-        last_loss = recent[-1].get("loss") if recent else None
-        hb.update(step, mean_reward, loss=last_loss)
-
-        nudge = hb.check_nudge()
-        if nudge:
-            new_lr = nudge.get("lr", lr)
-            for pg in trainer.optimizer.param_groups:
-                pg["lr"] = new_lr
-            print(f"[{agent_id}] Nudged: lr={new_lr}")
+    recent = trainer.state.log_history[-5:] if trainer.state.log_history else []
+    mean_reward = sum(log.get("reward", 0.0) for log in recent) / max(len(recent), 1)
+    step = trainer.state.global_step
 
     # Evaluate on 100 test puzzles (held-out 5% split)
     print(f"[{agent_id}] Evaluating on test set...")
@@ -230,12 +256,6 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     }
     with open(f"{results_dir}/{agent_id}/eval_result.json", "w") as f:
         json.dump(result, f, indent=2)
-
-    if wandb_run is not None:
-        try:
-            wandb_run.finish()
-        except Exception:
-            pass
 
     hb.stop("completed")
     print(f"[{agent_id}] done: mean_return={mean_return:.3f}")

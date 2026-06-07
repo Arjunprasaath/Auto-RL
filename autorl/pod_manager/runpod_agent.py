@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from pod_manager.pod_manager import (
     scp_from_pod,
     ssh_exec,
     terminate_pod,
+    verify_dependencies,
     wait_for_pod,
 )
 from orchestrator.schemas import SpawnPlanEntry
@@ -63,19 +65,28 @@ def _scp_to_pod(local_path: str, remote_path: str, host: str, port: int) -> None
 def _upload_training_code(pod_id: str) -> None:
     """
     Upload the training/ and environments/ packages to /workspace/ on the pod.
-    This makes `train_grpo_countdown.py` importable as written.
+
+    SCP behaviour: when the destination directory already exists and the source
+    has a trailing slash, SCP copies the folder *itself* inside it, creating
+    /workspace/training/training/. Fix: wipe the target dirs first, then SCP
+    the directory names (no trailing slash) into /workspace/ — SCP then creates
+    /workspace/training/ and /workspace/environments/ directly.
     """
     host, port = get_pod_ssh_info(pod_id)
     autorl_dir = _PKG_ROOT  # …/autorl/
 
     print(f"[runpod_agent] Uploading training code to pod {pod_id}...")
-    ssh_exec(pod_id, f"mkdir -p {REMOTE_WORKSPACE}/training/callbacks {REMOTE_WORKSPACE}/environments")
 
-    for src, dest in [
-        (f"{autorl_dir}/training/", f"{REMOTE_WORKSPACE}/training/"),
-        (f"{autorl_dir}/environments/", f"{REMOTE_WORKSPACE}/environments/"),
-    ]:
-        _scp_to_pod(src, dest, host, port)
+    # Remove any stale copies so SCP always starts clean
+    ssh_exec(pod_id, (
+        f"rm -rf {REMOTE_WORKSPACE}/training {REMOTE_WORKSPACE}/environments && "
+        f"mkdir -p {REMOTE_WORKSPACE}"
+    ))
+
+    # SCP directory *names* (no trailing slash) into /workspace/ →
+    # creates /workspace/training/ and /workspace/environments/ correctly
+    for src in [f"{autorl_dir}/training", f"{autorl_dir}/environments"]:
+        _scp_to_pod(src, f"{REMOTE_WORKSPACE}/", host, port)
 
     print("[runpod_agent] Code upload complete.")
 
@@ -89,12 +100,16 @@ def _build_train_cmd(entry: SpawnPlanEntry) -> str:
     h = entry.hparams
     time_budget_s = entry.time_budget_min * 60
 
-    # Env vars forwarded inline so they're available to the training process
-    env_prefix = ""
-    for var in ("WANDB_API_KEY", "WEAVE_PROJECT", "OPENAI_API_KEY"):
+    env_args = ["PYTHONUNBUFFERED=1", "HF_HUB_ENABLE_HF_TRANSFER=1"]
+    for var in ("WANDB_API_KEY", "WEAVE_PROJECT", "WANDB_PROJECT", "OPENAI_API_KEY", "HF_TOKEN"):
         val = os.environ.get(var)
         if val:
-            env_prefix += f"{var}={val} "
+            env_args.append(f"{var}={val}")
+    # Ensure WANDB_PROJECT is set so wandb doesn't log to 'huggingface' by default
+    if not os.environ.get("WANDB_PROJECT") and os.environ.get("WEAVE_PROJECT"):
+        env_args.append(f"WANDB_PROJECT={os.environ['WEAVE_PROJECT']}")
+
+    env_prefix = "env " + " ".join(env_args) + " "
 
     parts = [
         env_prefix + VENV_PYTHON,
@@ -110,39 +125,98 @@ def _build_train_cmd(entry: SpawnPlanEntry) -> str:
     return " ".join(parts)
 
 
-def _poll_heartbeat(pod_id: str, agent_id: str, local_results_dir: str,
-                    poll_interval_s: int = 90, max_missing: int = 5) -> None:
+def _stream_pod_log(pod_id: str, agent_id: str, log_path: str, stop_event: threading.Event) -> None:
     """
-    Every `poll_interval_s` seconds, SCP heartbeat.json from the pod and
-    print its status. If heartbeat is missing `max_missing` times in a row,
-    prints a warning (the Sentinel will handle intervention).
+    Background thread: SSH tail -f on the remote train.log and print each line
+    prefixed with [pod-log][agent_id]. Runs until stop_event is set.
+    """
+    host, port = get_pod_ssh_info(pod_id)
+    try:
+        proc = subprocess.Popen(
+            [
+                "ssh", "-p", str(port),
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=30",
+                "-o", "ServerAliveInterval=30",
+                f"root@{host}",
+                f"tail -F {log_path} 2>/dev/null",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        while not stop_event.is_set():
+            line = proc.stdout.readline()
+            if line:
+                print(f"[pod-log][{agent_id}] {line.rstrip()}", flush=True)
+            elif proc.poll() is not None:
+                break
+        proc.terminate()
+    except Exception as e:
+        print(f"[pod-log][{agent_id}] log stream stopped: {e}")
+
+
+def _poll_heartbeat(pod_id: str, agent_id: str, local_results_dir: str,
+                    poll_interval_s: int = 60,
+                    startup_max_missing: int = 20,
+                    running_max_missing: int = 5) -> None:
+    """
+    Poll heartbeat.json from the pod every `poll_interval_s` seconds.
+
+    Two phases:
+      - Startup: tolerates up to `startup_max_missing` consecutive misses
+        (default 20 × 60s = 20 min) while the model downloads and loads.
+      - Running: once the first heartbeat is seen, only tolerates
+        `running_max_missing` consecutive misses (default 5 × 60s = 5 min)
+        before flagging as stuck.
+
+    Also launches a background thread that streams train.log live to stdout.
     """
     remote_hb = f"{REMOTE_RESULTS}/{agent_id}/heartbeat.json"
     local_hb = f"{local_results_dir}/{agent_id}/heartbeat.json"
+    log_path = f"{REMOTE_RESULTS}/{agent_id}/train.log"
     Path(f"{local_results_dir}/{agent_id}").mkdir(parents=True, exist_ok=True)
-    missing = 0
 
-    while True:
-        time.sleep(poll_interval_s)
-        try:
-            scp_from_pod(pod_id, remote_hb, local_hb)
-            with open(local_hb) as f:
-                hb = json.load(f)
-            status = hb.get("status", "?")
-            reward = hb.get("current_reward", 0.0)
-            steps = hb.get("steps_completed", 0)
-            print(f"[runpod_agent][{agent_id}] heartbeat: status={status} "
-                  f"steps={steps} reward={reward:.4f}")
-            missing = 0
-            if status in ("completed", "failed"):
-                break
-        except Exception as e:
-            missing += 1
-            print(f"[runpod_agent][{agent_id}] heartbeat missing ({missing}/{max_missing}): {e}")
-            if missing >= max_missing:
-                print(f"[runpod_agent][{agent_id}] WARNING: no heartbeat for "
-                      f"{missing * poll_interval_s}s — Sentinel should intervene")
-                break
+    missing = 0
+    first_heartbeat_seen = False
+    stop_log = threading.Event()
+
+    log_thread = threading.Thread(
+        target=_stream_pod_log,
+        args=(pod_id, agent_id, log_path, stop_log),
+        daemon=True,
+    )
+    log_thread.start()
+    print(f"[runpod_agent][{agent_id}] Live log streaming started (pod train.log)")
+
+    try:
+        while True:
+            time.sleep(poll_interval_s)
+            try:
+                scp_from_pod(pod_id, remote_hb, local_hb)
+                with open(local_hb) as f:
+                    hb = json.load(f)
+                status = hb.get("status", "?")
+                reward = hb.get("current_reward", 0.0)
+                steps = hb.get("steps_completed", 0)
+                print(f"[runpod_agent][{agent_id}] heartbeat: status={status} "
+                      f"steps={steps} reward={reward:.4f}", flush=True)
+                missing = 0
+                first_heartbeat_seen = True
+                if status in ("completed", "failed"):
+                    break
+            except Exception as e:
+                missing += 1
+                max_allowed = running_max_missing if first_heartbeat_seen else startup_max_missing
+                phase = "running" if first_heartbeat_seen else "startup"
+                print(f"[runpod_agent][{agent_id}] heartbeat missing "
+                      f"({missing}/{max_allowed}) [{phase}]: waiting...", flush=True)
+                if missing >= max_allowed:
+                    print(f"[runpod_agent][{agent_id}] WARNING: no heartbeat for "
+                          f"{missing * poll_interval_s}s — Sentinel should intervene")
+                    break
+    finally:
+        stop_log.set()
 
 
 @weave.op(name="RunPodAgent")
@@ -157,7 +231,7 @@ def run_grpo_on_runpod(
     Steps:
         1. Provision GPU pod
         2. Wait for RUNNING status
-        3. Install dependencies into /workspace/venv
+        3. Install dependencies into /workspace/venv + verify CUDA
         4. Upload training code to /workspace/
         5. Launch train_grpo_countdown.py in background
         6. Poll heartbeat.json every 90s
@@ -177,8 +251,13 @@ def run_grpo_on_runpod(
         if not wait_for_pod(pod_id):
             raise RuntimeError(f"Pod {pod_id} failed to reach RUNNING state")
 
-        # 3. Install deps
+        # 3. Install deps + verify CUDA is visible (fail fast if torch is CPU-only)
         install_dependencies(pod_id)
+        if not verify_dependencies(pod_id):
+            raise RuntimeError(
+                f"Dependency/CUDA verification failed on pod {pod_id} — "
+                "training would run on CPU. Aborting."
+            )
 
         # 4. Upload training code
         _upload_training_code(pod_id)

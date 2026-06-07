@@ -44,11 +44,13 @@ htmlcov/
 
 # AutoRL specific
 autorl/results/
+autorl/*results/
 autorl/runs/
 autorl/wandb/
 autorl/spawn_plan.json
 autorl/rankings.json
 autorl/run_report.md
+autorl/*results/
 *.mp4
 *.ckpt
 *.safetensors
@@ -61,6 +63,7 @@ out/
 # Logs
 *.log
 logs/
+*.json
 
 # OS
 .DS_Store
