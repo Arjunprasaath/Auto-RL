@@ -22,39 +22,38 @@ const REASON_LABEL: Record<string, string> = {
 };
 
 const OUTCOME_COLOR: Record<string, string> = {
-  pending: "text-yellow-400",
-  completed: "text-green-400",
-  failed_again: "text-red-400",
-  nudge_sent: "text-blue-400",
-  killed_permanently: "text-red-500",
+  pending: "text-amber-600",
+  completed: "text-green-600",
+  failed_again: "text-red-600",
+  nudge_sent: "text-blue-600",
+  killed_permanently: "text-red-700",
 };
 
 export function SentinelAlert({ intervention }: SentinelAlertProps) {
   const isPermanentKill = intervention.outcome === "killed_permanently";
 
   return (
-    <div className={`border rounded-xl p-4 text-sm shadow-lg w-full max-w-lg
-      ${isPermanentKill ? "bg-red-950 border-red-700" : "bg-amber-950 border-amber-700"}`}>
+    <div className={`border rounded-xl p-4 text-sm shadow-sm w-full max-w-lg
+      ${isPermanentKill ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
       <div className="flex items-start gap-3">
-        <span className="text-2xl mt-0.5">{isPermanentKill ? "🔴" : "⚠️"}</span>
+        <span className="text-base mt-0.5">{isPermanentKill ? "🔴" : "⚠️"}</span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <span className="font-bold text-amber-300">Doom Loop Sentinel</span>
-            <span className="text-gray-400 text-xs font-mono">{intervention.agent_id}</span>
+            <span className="font-bold text-amber-700">Doom Loop Sentinel</span>
+            <span className="text-stone-500 text-xs font-mono">{intervention.agent_id}</span>
           </div>
 
-          <p className="text-gray-200 mb-2">
+          <p className="text-stone-800 mb-2">
             {REASON_LABEL[intervention.failure_reason] ?? intervention.failure_reason}
           </p>
 
-          {/* Failed → Suggested hparams */}
-          <div className="bg-black/30 rounded-lg p-2 text-xs font-mono space-y-1 mb-2">
-            <div className="text-red-300">
+          <div className="bg-stone-100 rounded-lg p-2 text-xs font-mono space-y-1 mb-2">
+            <div className="text-red-700">
               Failed: lr={String(intervention.failed_hparams.lr)}
               {intervention.failed_hparams.seed !== undefined && ` seed=${intervention.failed_hparams.seed}`}
             </div>
             {Object.keys(intervention.llm_suggested_hparams).length > 0 && (
-              <div className="text-green-300">
+              <div className="text-green-700">
                 LLM suggests: {Object.entries(intervention.llm_suggested_hparams)
                   .map(([k, v]) => `${k}=${v}`)
                   .join(" ")}
@@ -63,10 +62,10 @@ export function SentinelAlert({ intervention }: SentinelAlertProps) {
           </div>
 
           <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-400">
+            <span className="text-stone-500">
               {new Date(intervention.timestamp).toLocaleTimeString()}
             </span>
-            <span className={OUTCOME_COLOR[intervention.outcome] ?? "text-gray-400"}>
+            <span className={OUTCOME_COLOR[intervention.outcome] ?? "text-stone-500"}>
               {intervention.outcome}
             </span>
           </div>
@@ -80,7 +79,7 @@ export function SentinelAlertList({ log }: { log: SentinelIntervention[] }) {
   if (log.length === 0) return null;
   return (
     <div className="space-y-3">
-      <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+      <p className="text-xs font-semibold text-stone-500 uppercase tracking-wider">
         Sentinel Interventions
       </p>
       {log.map((entry, i) => (

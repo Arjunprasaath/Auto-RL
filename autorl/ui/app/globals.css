@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0d0d0d;
-  --foreground: #e5e5e5;
+  --background: #FAF9F7;
+  --foreground: #1C1917;
+  --surface: #FFFFFF;
+  --surface-muted: #FFFCF8;
+  --border: #E7E5E4;
+  --border-strong: #D6D3D1;
+  --muted: #78716C;
 }
 
 @theme inline {
@@ -12,7 +17,7 @@
 }
 
 html {
-  font-size: 15px;
+  font-size: 14px;
 }
 
 body {
@@ -30,7 +35,6 @@ body {
   100% { opacity: 0; transform: scale(0.7); filter: blur(4px); }
 }
 
-/* Agent card appear (restarted) */
 @keyframes agentAppear {
   0%   { opacity: 0; transform: scale(0.7) translateY(12px); filter: blur(4px); }
   60%  { opacity: 1; transform: scale(1.03) translateY(-2px); filter: blur(0px); }

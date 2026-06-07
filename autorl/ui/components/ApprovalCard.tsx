@@ -22,24 +22,21 @@ export function ApprovalCard({ plan, task, onApprove, onReject }: ApprovalCardPr
   const cloudAgents = plan.filter((e) => e.exec === "runpod");
 
   return (
-    <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 max-w-lg w-full shadow-xl">
-      {/* Header */}
+    <div className="bg-white border border-stone-200 rounded-xl p-5 max-w-lg w-full shadow-sm">
       <div className="flex items-center gap-3 mb-4">
-        <div className="w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center text-sm font-bold">
+        <div className="w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center text-sm font-bold text-white">
           RL
         </div>
         <div>
-          <p className="font-semibold text-gray-100">AutoRL Orchestrator</p>
-          <p className="text-xs text-gray-400">Ready to spawn {plan.length} agents</p>
+          <p className="font-semibold text-stone-800">AutoRL Orchestrator</p>
+          <p className="text-sm text-stone-500">Ready to spawn {plan.length} agents</p>
         </div>
       </div>
 
-      {/* Task */}
-      <div className="bg-gray-800 rounded-lg px-3 py-2 mb-4 text-sm text-gray-300 italic">
+      <div className="bg-stone-50 rounded-lg px-3 py-2 mb-4 text-sm text-stone-700 italic border border-stone-200">
         &ldquo;{task}&rdquo;
       </div>
 
-      {/* Agent list */}
       <div className="space-y-2 mb-5">
         {plan.map((entry) => {
           const lr = entry.hparams.lr as number;
@@ -48,19 +45,19 @@ export function ApprovalCard({ plan, task, onApprove, onReject }: ApprovalCardPr
             <div
               key={entry.id}
               className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm
-                ${isDangerous ? "bg-red-950 border border-red-800" : "bg-gray-800"}`}
+                ${isDangerous ? "bg-red-50 border border-red-200" : "bg-stone-50 border border-stone-200"}`}
             >
               <div className="flex items-center gap-2">
-                <span className="font-mono text-violet-300">{entry.id}</span>
-                <span className="text-gray-300">{entry.algo}</span>
-                <span className="text-gray-500 text-xs">{entry.env}</span>
+                <span className="font-mono text-violet-700">{entry.id}</span>
+                <span className="text-stone-700">{entry.algo}</span>
+                <span className="text-stone-500 text-xs">{entry.env}</span>
                 {isDangerous && (
-                  <span className="text-red-400 text-xs font-semibold">⚠ lr={lr} (sentinel bait)</span>
+                  <span className="text-red-600 text-xs font-semibold">⚠ lr={lr} (sentinel bait)</span>
                 )}
               </div>
-              <div className="flex items-center gap-2 text-xs text-gray-400">
+              <div className="flex items-center gap-2 text-xs text-stone-600">
                 <span>{entry.time_budget_min}m</span>
-                <span className={`px-1.5 py-0.5 rounded ${entry.exec === "local" ? "bg-blue-900 text-blue-300" : "bg-orange-900 text-orange-300"}`}>
+                <span className={`px-1.5 py-0.5 rounded ${entry.exec === "local" ? "bg-blue-100 text-blue-700" : "bg-orange-100 text-orange-700"}`}>
                   {entry.exec}
                 </span>
               </div>
@@ -69,28 +66,26 @@ export function ApprovalCard({ plan, task, onApprove, onReject }: ApprovalCardPr
         })}
       </div>
 
-      {/* Summary */}
-      <div className="text-xs text-gray-400 mb-5 space-y-0.5">
+      <div className="text-sm text-stone-600 mb-5 space-y-0.5">
         <p>Local: {localAgents.length} agent{localAgents.length !== 1 ? "s" : ""} (Mac CPU)</p>
         {cloudAgents.length > 0 && (
           <p>Cloud: {cloudAgents.length} agent{cloudAgents.length !== 1 ? "s" : ""} (RunPod GPU)</p>
         )}
-        <p className="text-yellow-400 mt-1">
+        <p className="text-amber-600 mt-1">
           Doom Loop Sentinel will monitor all agents for NaN / stale behavior.
         </p>
       </div>
 
-      {/* Buttons */}
       <div className="flex gap-3">
         <button
           onClick={onApprove}
-          className="flex-1 bg-violet-600 hover:bg-violet-500 text-white font-semibold py-2 rounded-lg transition-colors text-sm"
+          className="flex-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold py-2 rounded-lg transition-colors text-sm"
         >
           Approve & Launch
         </button>
         <button
           onClick={onReject}
-          className="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-300 font-semibold py-2 rounded-lg transition-colors text-sm"
+          className="flex-1 bg-stone-100 hover:bg-stone-200 text-stone-700 font-semibold py-2 rounded-lg transition-colors text-sm border border-stone-300"
         >
           Reject
         </button>

@@ -22,7 +22,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={jetbrainsMono.variable}>
-      <body className="bg-[#0d0d0d] text-gray-100 min-h-screen">
+      <body className="bg-[#FAF9F7] text-stone-800 min-h-screen">
         <CopilotKit runtimeUrl="/api/copilotkit">
           {children}
         </CopilotKit>

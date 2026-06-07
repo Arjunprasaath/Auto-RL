@@ -81,7 +81,7 @@ const ENV_FAMILY_META: Record<EnvFamily, {
   mujoco:  { label: "MuJoCo",     icon: "⬡", fps: "30 fps", color: "text-amber-400",
              desc: "Continuous control — physics simulation",
              inferLabel: "▶ watch",  episodeNote: "1 deterministic episode" },
-  classic: { label: "Classic",    icon: "◈", fps: "30 fps", color: "text-gray-300",
+  classic: { label: "Classic",    icon: "◈", fps: "30 fps", color: "text-stone-700",
              desc: "Classic control task",
              inferLabel: "▶ run",    episodeNote: "3 deterministic episodes" },
   toytext: { label: "Grid World", icon: "⊞", fps: "4 fps",  color: "text-green-400",
@@ -101,12 +101,12 @@ const ENV_FAMILY_META: Record<EnvFamily, {
 // ── Style maps ─────────────────────────────────────────────────────────────────
 
 const ALGO_STYLE: Record<string, { accent: string; tag: string; bar: string; rgb: string }> = {
-  PPO:  { accent: "text-violet-400",  tag: "text-violet-300 border-violet-700",  bar: "bg-violet-500",  rgb: "#8b5cf6" },
-  SAC:  { accent: "text-cyan-400",    tag: "text-cyan-300 border-cyan-700",      bar: "bg-cyan-500",    rgb: "#06b6d4" },
-  A2C:  { accent: "text-pink-400",    tag: "text-pink-300 border-pink-700",      bar: "bg-pink-500",    rgb: "#ec4899" },
-  GRPO: { accent: "text-amber-400",   tag: "text-amber-300 border-amber-700",    bar: "bg-amber-500",   rgb: "#f97316" },
+  PPO:  { accent: "text-violet-600",  tag: "text-violet-700 border-violet-300 bg-violet-50",  bar: "bg-violet-500",  rgb: "#8b5cf6" },
+  SAC:  { accent: "text-cyan-600",    tag: "text-cyan-700 border-cyan-300 bg-cyan-50",      bar: "bg-cyan-500",    rgb: "#06b6d4" },
+  A2C:  { accent: "text-pink-600",    tag: "text-pink-700 border-pink-300 bg-pink-50",      bar: "bg-pink-500",    rgb: "#ec4899" },
+  GRPO: { accent: "text-amber-600",   tag: "text-amber-700 border-amber-300 bg-amber-50",    bar: "bg-amber-500",   rgb: "#f97316" },
 };
-const DEF_STYLE = { accent: "text-gray-400", tag: "text-gray-300 border-gray-700", bar: "bg-gray-500", rgb: "#6b7280" };
+const DEF_STYLE = { accent: "text-stone-600", tag: "text-stone-700 border-stone-300 bg-stone-50", bar: "bg-stone-400", rgb: "#78716c" };
 const as = (algo: string) => ALGO_STYLE[algo] ?? DEF_STYLE;
 const SEG_COLORS = ["#8b5cf6", "#06b6d4", "#34d399", "#fbbf24", "#f472b6"];
 
@@ -125,20 +125,20 @@ function MiniChart({
     return (
       <div className="w-full h-[72px] flex flex-col justify-center gap-2 px-1">
         <div className="flex justify-between text-sm">
-          <span className="text-gray-600">success rate</span>
+          <span className="text-stone-500">success rate</span>
           <span className="text-green-400">{(rate * 100).toFixed(0)}%</span>
         </div>
-        <div className="w-full bg-[#1a1a1a] h-1.5">
+        <div className="w-full bg-stone-200 h-1.5">
           <div className="h-1.5 bg-green-500 transition-all duration-700" style={{ width: `${rate * 100}%` }} />
         </div>
-        <p className="text-xs text-gray-600">{successes}/{history.length} episodes</p>
+        <p className="text-sm text-stone-500">{successes}/{history.length} episodes</p>
       </div>
     );
   }
 
   if (history.length < 2) return (
     <div className="w-full h-[72px] flex items-center">
-      <p className="text-sm text-gray-700">awaiting data…</p>
+      <p className="text-sm text-stone-500">awaiting data…</p>
     </div>
   );
 
@@ -169,13 +169,13 @@ function MiniChart({
               strokeDasharray={isFailSeg ? "4 3" : undefined} />
             {seg > 0 && pts.length > 0 && (
               <circle cx={xS(pts[0].steps)} cy={yS(pts[0].reward)} r="3"
-                fill={color} stroke="#0d0d0d" strokeWidth="1" />
+                fill={color} stroke="#FAF9F7" strokeWidth="1" />
             )}
           </g>
         );
       })}
-      <text x="2" y="10" fontSize="8" fill="#555" fontFamily="monospace">{maxR.toFixed(0)}</text>
-      <text x="2" y={H - 2} fontSize="8" fill="#555" fontFamily="monospace">{minR.toFixed(0)}</text>
+      <text x="2" y="10" fontSize="8" fill="#78716c" fontFamily="monospace">{maxR.toFixed(0)}</text>
+      <text x="2" y={H - 2} fontSize="8" fill="#78716c" fontFamily="monospace">{minR.toFixed(0)}</text>
     </svg>
   );
 }
@@ -203,26 +203,26 @@ function PlanningScreen({ task }: { task: string }) {
   }, []);
   return (
     <div className="w-full max-w-xl space-y-5">
-      <div className="border border-[#2a2a2a] bg-[#111] px-4 py-3">
-        <p className="text-xs text-gray-600 mb-1">task</p>
-        <p className="text-base text-gray-300">&ldquo;{task}&rdquo;</p>
+      <div className="border border-stone-200 bg-white px-4 py-3">
+        <p className="text-sm text-stone-500 mb-1">task</p>
+        <p className="text-sm text-stone-700">&ldquo;{task}&rdquo;</p>
       </div>
       <div className="space-y-3">
         {PLAN_STEPS.map((label, i) => {
           const done = i < step, active = i === step;
           return (
             <div key={i} className="flex items-center gap-3 text-sm">
-              <span className={done ? "text-amber-500" : active ? "text-amber-500" : "text-gray-700"}>
+              <span className={done ? "text-amber-500" : active ? "text-amber-500" : "text-stone-500"}>
                 {done ? "✓" : active ? "›" : "·"}
               </span>
-              <span className={done ? "text-gray-600 line-through" : active ? "text-gray-200" : "text-gray-700"}>
+              <span className={done ? "text-stone-500 line-through" : active ? "text-stone-800" : "text-stone-500"}>
                 {label}{active ? dots : ""}
               </span>
             </div>
           );
         })}
       </div>
-      <p className="text-xs text-gray-700">orchestrator LLM · ~10–20 s</p>
+      <p className="text-sm text-stone-500">orchestrator LLM · ~10–20 s</p>
     </div>
   );
 }
@@ -256,20 +256,20 @@ function AgentLineupCard({
   ] as [string, string][];
 
   return (
-    <div className={`border border-[#2a2a2a] bg-[#111] text-sm ${isDoom ? "border-red-900/60" : ""}`}>
+    <div className={`border border-stone-200 bg-white text-sm ${isDoom ? "border-red-300/60" : ""}`}>
       {/* top bar */}
-      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2a2a]">
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-stone-200">
         <div className="flex items-center gap-2.5">
-          <span className="text-gray-600 text-xs">#{index + 1}</span>
+          <span className="text-stone-500 text-sm">#{index + 1}</span>
           <span className={`border px-2 py-0.5 text-sm ${st.tag}`}>{entry.algo}</span>
-          <span className="text-gray-300">{entry.env}</span>
+          <span className="text-stone-700">{entry.env}</span>
           {isDoom && <span className="text-red-500">☠</span>}
         </div>
-        <div className="flex items-center gap-3 text-gray-500">
-          <span className="text-xs">{entry.time_budget_min}m</span>
+        <div className="flex items-center gap-3 text-stone-600">
+          <span className="text-sm">{entry.time_budget_min}m</span>
           <button onClick={() => { setDraft(entry); setEditing(e => !e); }}
             className="hover:text-amber-400 transition-colors">{editing ? "cancel" : "edit"}</button>
-          <button onClick={onDelete} className="hover:text-red-400 transition-colors text-base leading-none">×</button>
+          <button onClick={onDelete} className="hover:text-red-400 transition-colors text-sm leading-none">×</button>
         </div>
       </div>
 
@@ -277,34 +277,34 @@ function AgentLineupCard({
       {!editing && (
         <div className="px-3 py-2.5 flex flex-wrap gap-x-5 gap-y-1.5">
           {hpList.map(([k, v]) => (
-            <span key={k} className={k === "lr" && isDoom ? "text-red-400" : "text-gray-400"}>
-              <span className="text-gray-600">{k}=</span>{v}
+            <span key={k} className={k === "lr" && isDoom ? "text-red-400" : "text-stone-600"}>
+              <span className="text-stone-500">{k}=</span>{v}
             </span>
           ))}
-          {isDoom && <span className="text-red-500 ml-auto text-xs">sentinel bait</span>}
+          {isDoom && <span className="text-red-500 ml-auto text-sm">sentinel bait</span>}
         </div>
       )}
 
       {/* edit form */}
       {editing && (
-        <div className="px-3 py-3 space-y-3 border-t border-[#2a2a2a]">
+        <div className="px-3 py-3 space-y-3 border-t border-stone-200">
           <div className="grid grid-cols-2 gap-x-6 gap-y-2">
             <div className="flex items-center gap-2">
-              <span className="text-gray-600 w-20 text-xs">budget</span>
+              <span className="text-stone-500 w-20 text-sm">budget</span>
               <input type="number" step="1" min="1" max="30"
                 value={draft.time_budget_min}
                 onChange={e => setDraft(d => ({ ...d, time_budget_min: parseInt(e.target.value) || d.time_budget_min }))}
-                className="flex-1 bg-[#0d0d0d] border border-[#333] px-2 py-1 text-sm text-gray-200 outline-none focus:border-amber-600" />
+                className="flex-1 bg-[#FAF9F7] border border-stone-300 px-2 py-1 text-sm text-stone-800 outline-none focus:border-amber-600" />
             </div>
             {(["lr","seed","gamma","ent_coef","n_steps"] as const)
               .filter(k => draft.hparams[k] != null)
               .map(k => (
                 <div key={k} className="flex items-center gap-2">
-                  <span className="text-gray-600 w-20 text-xs">{k}</span>
+                  <span className="text-stone-500 w-20 text-sm">{k}</span>
                   <input type="number" step={k === "seed" ? "1" : k === "n_steps" ? "256" : "any"}
                     value={String(draft.hparams[k])}
                     onChange={e => setHp(k, e.target.value)}
-                    className="flex-1 bg-[#0d0d0d] border border-[#333] px-2 py-1 text-sm text-gray-200 outline-none focus:border-amber-600" />
+                    className="flex-1 bg-[#FAF9F7] border border-stone-300 px-2 py-1 text-sm text-stone-800 outline-none focus:border-amber-600" />
                 </div>
               ))}
           </div>
@@ -314,7 +314,7 @@ function AgentLineupCard({
               save
             </button>
             <button onClick={() => { setDraft(entry); setEditing(false); }}
-              className="flex-1 border border-[#333] hover:border-gray-500 text-gray-400 py-1.5 transition-colors text-sm">
+              className="flex-1 border border-stone-300 hover:border-stone-400 text-stone-600 py-1.5 transition-colors text-sm">
               cancel
             </button>
           </div>
@@ -371,58 +371,58 @@ function LiveAgentCard({
     status === "completed" ? <span className="text-amber-400">✓</span> :
     status === "failed"    ? <span className="text-red-400">✗</span> :
     status === "restarted" ? <span className="text-yellow-400">↩</span> :
-                             <span className="text-gray-600">○</span>;
+                             <span className="text-stone-500">○</span>;
 
   const animClass = animState === "vanish" ? "agent-vanish" : animState === "appear" ? "agent-appear" : "";
 
   return (
-    <div className={`border border-[#2a2a2a] bg-[#111] text-sm
-      ${hasNaN ? "border-red-900/60" : status === "completed" ? "border-[#2a3a2a]" : ""}
+    <div className={`border border-stone-200 bg-white text-sm
+      ${hasNaN ? "border-red-300/60" : status === "completed" ? "border-emerald-200" : ""}
       ${animClass}`}>
 
       {/* header */}
-      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#2a2a2a]">
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-stone-200">
         <div className="flex items-center gap-2.5">
           {statusDot}
           <span className={`border px-2 py-0.5 ${st.tag}`}>{entry.algo}</span>
-          <span className="text-gray-400">{entry.id}</span>
-          {currentSeg > 0 && <span className="text-yellow-500 text-xs">restart×{currentSeg}</span>}
+          <span className="text-stone-600">{entry.id}</span>
+          {currentSeg > 0 && <span className="text-yellow-500 text-sm">restart×{currentSeg}</span>}
         </div>
         <div className="flex items-center gap-2.5">
           <button onClick={onInfer} disabled={inferring}
             className={`px-2.5 py-1 border transition-colors text-sm
               ${inferring
-                ? "border-[#222] text-gray-600 cursor-not-allowed"
-                : "border-[#333] text-gray-500 hover:border-amber-600 hover:text-amber-400"}`}>
+                ? "border-stone-200 text-stone-400 cursor-not-allowed"
+                : "border-stone-300 text-stone-600 hover:border-amber-600 hover:text-amber-400"}`}>
             {inferring
               ? (isGrpo ? "loading…" : "recording…")
               : (isGrpo ? "test" : "infer")}
           </button>
-          <span className="text-gray-600">{status}</span>
+          <span className="text-stone-500">{status}</span>
         </div>
       </div>
 
       {/* env row */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[#1a1a1a]">
-        <span className="text-gray-400">{entry.env}</span>
-        <span className={`${fmeta.color} text-xs`}>{fmeta.icon} {fmeta.label}</span>
+      <div className="flex items-center justify-between px-3 py-2 border-b border-stone-100">
+        <span className="text-stone-600">{entry.env}</span>
+        <span className={`${fmeta.color} text-sm`}>{fmeta.icon} {fmeta.label}</span>
       </div>
 
       {/* env-doctor intervention (setup errors only) */}
       {latestDoctor && (
-        <div className="px-3 py-2 border-b border-[#2a2a2a] bg-[#0d1a1a]">
-          <p className="text-cyan-400 mb-1 text-xs">
+        <div className="px-3 py-2 border-b border-stone-200 bg-cyan-50">
+          <p className="text-cyan-700 mb-1 text-sm">
             env-doctor {latestDoctor.outcome === "fixed_retrying" ? "fixed" : "failed"}
           </p>
           {(latestDoctor.llm_suggested_hparams?.fix_commands as string[] | undefined)?.map((c, i) => (
-            <p key={i} className="text-gray-400 text-xs">$ {c}</p>
+            <p key={i} className="text-stone-600 text-sm">$ {c}</p>
           ))}
         </div>
       )}
       {latestIntervention && currentSeg > 0 && (
-        <div className="px-3 py-2 border-b border-[#2a2a2a] bg-[#1a1500]">
-          <p className="text-yellow-500 mb-0.5 text-xs">sentinel restart #{currentSeg}</p>
-          <p className="text-gray-400 text-xs">
+        <div className="px-3 py-2 border-b border-stone-200 bg-amber-50">
+          <p className="text-yellow-500 mb-0.5 text-sm">sentinel restart #{currentSeg}</p>
+          <p className="text-stone-600 text-sm">
             {Object.entries(latestIntervention.llm_suggested_hparams).map(([k, v]) => `${k}=${v}`).join(" · ")}
           </p>
         </div>
@@ -432,27 +432,27 @@ function LiveAgentCard({
       {hb ? (
         <div className="px-3 py-2.5 space-y-2">
           <div className="flex gap-6">
-            <span className="text-gray-600">steps <span className="text-gray-200">{hb.steps_completed.toLocaleString()}</span></span>
-            <span className="text-gray-600">{rewardLabel(family, entry.env)} <span className={`font-bold ${hb.current_reward > 0 ? "text-green-400" : "text-gray-300"}`}>
+            <span className="text-stone-500">steps <span className="text-stone-800">{hb.steps_completed.toLocaleString()}</span></span>
+            <span className="text-stone-500">{rewardLabel(family, entry.env)} <span className={`font-bold ${hb.current_reward > 0 ? "text-green-400" : "text-stone-700"}`}>
               {formatLiveReward(hb.current_reward, family, entry.env)}</span>
             </span>
           </div>
-          <div className="w-full bg-[#1a1a1a] h-1">
+          <div className="w-full bg-stone-200 h-1">
             <div className={`h-1 transition-all duration-700 ${hasNaN ? "bg-red-500" : status === "completed" ? "bg-amber-500" : st.bar}`}
               style={{ width: `${pct}%` }} />
           </div>
-          {hasNaN && <p className="text-red-400 text-xs">nan loss — sentinel intervening…</p>}
+          {hasNaN && <p className="text-red-400 text-sm">nan loss — sentinel intervening…</p>}
         </div>
       ) : (
-        <div className="px-3 py-2.5 text-gray-600">starting…</div>
+        <div className="px-3 py-2.5 text-stone-500">starting…</div>
       )}
 
       {/* chart */}
       {history.length >= 2 && (
-        <div className="border-t border-[#1a1a1a] px-2 py-1.5">
+        <div className="border-t border-stone-100 px-2 py-1.5">
           <MiniChart history={history} algoRgb={st.rgb} hasNaN={hasNaN} family={family} env={entry.env} />
           {currentSeg > 0 && (
-            <div className="flex items-center gap-3 mt-1 text-xs text-gray-600 flex-wrap">
+            <div className="flex items-center gap-3 mt-1 text-sm text-stone-500 flex-wrap">
               {Array.from({ length: currentSeg + 1 }, (_, i) => (
                 <span key={i} className="flex items-center gap-1">
                   <span className="w-3 h-px inline-block" style={{ backgroundColor: SEG_COLORS[i % SEG_COLORS.length] }} />
@@ -523,21 +523,21 @@ function Leaderboard({
   return (
     <div className="text-sm space-y-3">
       <div className="flex items-center justify-between">
-        <span className="text-gray-500 uppercase tracking-widest text-xs">leaderboard</span>
-        <span className={`text-xs ${phase === "done" ? "text-amber-400" : "text-green-400 animate-pulse"}`}>
+        <span className="text-stone-600 uppercase tracking-widest text-sm">leaderboard</span>
+        <span className={`text-sm ${phase === "done" ? "text-amber-400" : "text-green-400 animate-pulse"}`}>
           {phase === "done" ? "final" : "live"}
         </span>
       </div>
 
       {multiEnv && (
-        <p className="text-yellow-600 text-xs">scores across different envs are not comparable</p>
+        <p className="text-yellow-600 text-sm">scores across different envs are not comparable</p>
       )}
 
       {[...byEnv.entries()].map(([env, grp]) => (
         <div key={env} className="space-y-1">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-500">{env}</span>
-            {ENV_SCALE_NOTE[env] && <span className="text-gray-700">{ENV_SCALE_NOTE[env]}</span>}
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-stone-600">{env}</span>
+            {ENV_SCALE_NOTE[env] && <span className="text-stone-500">{ENV_SCALE_NOTE[env]}</span>}
           </div>
           {grp.map((row, i) => {
             const st = as(row.algo);
@@ -546,14 +546,14 @@ function Leaderboard({
             return (
               <div key={row.id}
                 className={`flex items-center gap-2.5 px-2.5 py-2 border
-                  ${row.failed  ? "border-[#2a1a1a] text-gray-600" :
-                    i === 0     ? "border-[#2a2a1a] bg-[#141408]" :
+                  ${row.failed  ? "border-[#2a1a1a] text-stone-500" :
+                    i === 0     ? "border-[#2a2a1a] bg-amber-50" :
                                   "border-[#1e1e1e]"}`}>
-                <span className={i === 0 && !row.failed ? "text-amber-400" : "text-gray-600"}>{rankIcon}</span>
+                <span className={i === 0 && !row.failed ? "text-amber-400" : "text-stone-500"}>{rankIcon}</span>
                 <span className={`border px-1.5 ${st.tag}`}>{row.algo}</span>
-                <span className="text-gray-500 flex-1 truncate">{row.id}</span>
-                {row.restarts > 0 && <span className="text-yellow-600 text-xs">↩{row.restarts}</span>}
-                <span className={`font-bold ${row.failed ? "text-red-600" : row.score > 0 ? "text-green-400" : "text-gray-400"}`}>
+                <span className="text-stone-600 flex-1 truncate">{row.id}</span>
+                {row.restarts > 0 && <span className="text-yellow-600 text-sm">↩{row.restarts}</span>}
+                <span className={`font-bold ${row.failed ? "text-red-600" : row.score > 0 ? "text-green-400" : "text-stone-600"}`}>
                   {formatScore(row.score, row.env)}
                 </span>
               </div>
@@ -563,7 +563,7 @@ function Leaderboard({
       ))}
 
       {phase === "racing" && (
-        <p className="text-gray-700 text-xs">updates every 2 s</p>
+        <p className="text-stone-500 text-sm">updates every 2 s</p>
       )}
     </div>
   );
@@ -579,19 +579,19 @@ function SentinelBanner({ entry }: { entry: SentinelEntry }) {
 
   if (isDoctor) {
     return (
-      <div className={`border text-sm ${fixOk ? "border-cyan-900 bg-[#0a1515]" : "border-orange-900 bg-[#150f00]"}`}>
-        <div className="px-3 py-2.5 border-b border-[#2a2a2a] flex items-center gap-2">
-          <span className={fixOk ? "text-cyan-400" : "text-orange-400"}>env-doctor</span>
-          <span className="text-gray-500">{entry.agent_id}</span>
-          <span className="text-gray-700 ml-auto text-xs">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+      <div className={`border text-sm ${fixOk ? "border-cyan-300 bg-cyan-50" : "border-orange-300 bg-orange-50"}`}>
+        <div className="px-3 py-2.5 border-b border-stone-200 flex items-center gap-2">
+          <span className={fixOk ? "text-cyan-700" : "text-orange-700"}>env-doctor</span>
+          <span className="text-stone-600">{entry.agent_id}</span>
+          <span className="text-stone-500 ml-auto text-sm">{new Date(entry.timestamp).toLocaleTimeString()}</span>
         </div>
         {cmds.length > 0 && (
           <div className="px-3 py-2 space-y-1">
-            {cmds.map((c, i) => <p key={i} className="text-gray-400">$ {c}</p>)}
+            {cmds.map((c, i) => <p key={i} className="text-stone-600">$ {c}</p>)}
           </div>
         )}
-        {entry.rationale && <p className="px-3 pb-2 text-gray-600">{entry.rationale}</p>}
-        <p className={`px-3 pb-2 ${fixOk ? "text-cyan-400" : "text-red-400"}`}>
+        {entry.rationale && <p className="px-3 pb-2 text-stone-500">{entry.rationale}</p>}
+        <p className={`px-3 pb-2 ${fixOk ? "text-cyan-700" : "text-red-600"}`}>
           → {fixOk ? "fixed — retrying" : "fix failed"}
         </p>
       </div>
@@ -600,24 +600,24 @@ function SentinelBanner({ entry }: { entry: SentinelEntry }) {
 
   return (
     <div className={`flex items-start gap-3 rounded-xl p-3 border text-sm
-      ${isKilled ? "bg-red-950 border-red-700" : "bg-amber-950 border-amber-700"}`}>
-      <span className="text-lg mt-0.5">{isKilled ? "🔴" : "⚠️"}</span>
+      ${isKilled ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
+      <span className="text-sm mt-0.5">{isKilled ? "🔴" : "⚠️"}</span>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-1 flex-wrap">
-          <span className="font-bold text-amber-300 text-xs">Sentinel</span>
-          <span className="font-mono text-xs text-gray-400">{entry.agent_id}</span>
-          <span className="text-xs text-gray-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+          <span className="font-bold text-amber-700 text-sm">Sentinel</span>
+          <span className="font-mono text-sm text-stone-600">{entry.agent_id}</span>
+          <span className="text-sm text-stone-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
         </div>
-        <div className="bg-black/30 rounded-lg p-2 font-mono text-xs space-y-1">
+        <div className="bg-stone-100 rounded-lg p-2 font-mono text-sm space-y-1">
           {entry.failed_hparams && (
-            <p className="text-red-300">Failed: {Object.entries(entry.failed_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
+            <p className="text-red-700">Failed: {Object.entries(entry.failed_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
           )}
           {entry.llm_suggested_hparams && Object.keys(entry.llm_suggested_hparams).length > 0 && (
-            <p className="text-green-300">GPT → {Object.entries(entry.llm_suggested_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
+            <p className="text-green-700">GPT → {Object.entries(entry.llm_suggested_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
           )}
         </div>
-        <p className={`text-xs mt-1 font-semibold
-          ${entry.outcome === "completed" ? "text-green-400" : isKilled ? "text-red-400" : "text-yellow-400"}`}>
+        <p className={`text-sm mt-1 font-semibold
+          ${entry.outcome === "completed" ? "text-green-600" : isKilled ? "text-red-600" : "text-amber-600"}`}>
           → {entry.outcome}
         </p>
       </div>
@@ -636,14 +636,14 @@ function InferenceShowcase({ cases, baseline, agentId, wandbArtifact }: {
   return (
     <div className="text-sm space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold text-gray-300">
+        <p className="text-sm font-semibold text-stone-700">
           {hasBaseline ? "Before / After Training — " : "Inference Showcase — "}
           <span className="font-mono text-orange-400">{agentId}</span>
         </p>
-        <span className="text-xs text-gray-500">{passed}/{cases.length} correct after training</span>
+        <span className="text-sm text-stone-600">{passed}/{cases.length} correct after training</span>
       </div>
       {wandbArtifact && (
-        <p className="text-xs text-gray-500">
+        <p className="text-sm text-stone-600">
           Model artifact: <span className="font-mono text-violet-400">{wandbArtifact}</span> (W&B)
         </p>
       )}
@@ -652,39 +652,38 @@ function InferenceShowcase({ cases, baseline, agentId, wandbArtifact }: {
         <div className="space-y-3">
           {/* Column headers */}
           <div className="grid grid-cols-2 gap-3">
-            <div className="text-xs font-semibold text-gray-400 text-center py-1 bg-gray-800/50 rounded-lg">
+            <div className="text-sm font-semibold text-stone-600 text-center py-1 bg-stone-100 rounded-lg">
               Before (base model)
             </div>
-            <div className="text-xs font-semibold text-orange-400 text-center py-1 bg-orange-950/30 rounded-lg border border-orange-900/40">
+            <div className="text-sm font-semibold text-orange-600 text-center py-1 bg-orange-50 rounded-lg border border-orange-200">
               After (trained)
             </div>
           </div>
           {cases.map((c, i) => {
             const b = baseline[i];
             return (
-              <div key={i} className="rounded-xl border border-gray-700 bg-gray-900/40 overflow-hidden">
-                {/* Case header */}
-                <div className="flex items-center justify-between px-3 py-2 bg-gray-800/60 border-b border-gray-700">
-                  <span className="text-xs font-mono text-gray-400">
+              <div key={i} className="rounded-xl border border-stone-200 bg-white overflow-hidden shadow-sm">
+                <div className="flex items-center justify-between px-3 py-2 bg-stone-50 border-b border-stone-200">
+                  <span className="text-sm font-mono text-stone-600">
                     [{c.numbers.join(", ")}] → {c.target}
                   </span>
-                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full
-                    ${c.success ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"}`}>
+                  <span className={`text-sm font-bold px-2 py-0.5 rounded-full
+                    ${c.success ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
                     {c.success ? "✅ PASS" : "❌ FAIL"}
                   </span>
                 </div>
                 {/* Two-column responses */}
-                <div className="grid grid-cols-2 divide-x divide-gray-700">
+                <div className="grid grid-cols-2 divide-x divide-stone-200">
                   <div className="p-2">
-                    <div className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-500 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                    <div className="bg-stone-100 rounded-lg p-2 text-sm font-mono text-stone-600 whitespace-pre-wrap max-h-40 overflow-y-auto">
                       {b?.model_response || "(no baseline)"}
                     </div>
                   </div>
                   <div className="p-2">
-                    <div className={`rounded-lg p-2 text-xs font-mono whitespace-pre-wrap max-h-40 overflow-y-auto
+                    <div className={`rounded-lg p-2 text-sm font-mono whitespace-pre-wrap max-h-40 overflow-y-auto
                       ${c.success
-                        ? "bg-emerald-950/40 text-emerald-200"
-                        : "bg-black/30 text-gray-300"}`}>
+                        ? "bg-emerald-50 text-emerald-800"
+                        : "bg-stone-100 text-stone-700"}`}>
                       {c.model_response || "(empty response)"}
                     </div>
                   </div>
@@ -697,20 +696,20 @@ function InferenceShowcase({ cases, baseline, agentId, wandbArtifact }: {
         <div className="space-y-2">
           {cases.map((c, i) => (
             <div key={i} className={`rounded-xl border p-3 space-y-2
-              ${c.success ? "bg-emerald-950/40 border-emerald-800" : "bg-red-950/40 border-red-800"}`}>
+              ${c.success ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200"}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="text-sm">{c.success ? "✅" : "❌"}</span>
-                  <span className="text-xs font-mono text-gray-400">
+                  <span className="text-sm font-mono text-stone-600">
                     [{c.numbers.join(", ")}] → {c.target}
                   </span>
                 </div>
-                <span className={`text-xs font-bold px-2 py-0.5 rounded-full
-                  ${c.success ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"}`}>
+                <span className={`text-sm font-bold px-2 py-0.5 rounded-full
+                  ${c.success ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
                   {c.success ? "PASS" : "FAIL"}
                 </span>
               </div>
-              <div className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-300 whitespace-pre-wrap max-h-32 overflow-y-auto">
+              <div className="bg-stone-100 rounded-lg p-2 text-sm font-mono text-stone-700 whitespace-pre-wrap max-h-32 overflow-y-auto">
                 {c.model_response || "(empty response)"}
               </div>
             </div>
@@ -730,28 +729,28 @@ function VideoModal({ url, agentId, envId, envFamily, onClose }: {
   const isCompact = envFamily === "toytext" || envFamily === "atari";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50"
       onClick={onClose}>
-      <div className={`bg-[#0d0d0d] border border-[#333] p-4 w-full mx-4 space-y-3 ${isCompact ? "max-w-md" : "max-w-2xl"}`}
+      <div className={`bg-[#FAF9F7] border border-stone-300 p-4 w-full mx-4 space-y-3 ${isCompact ? "max-w-md" : "max-w-2xl"}`}
         onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-[#2a2a2a] pb-3">
+        <div className="flex items-center justify-between border-b border-stone-200 pb-3">
           <div>
-            <span className={`text-base ${meta.color}`}>{meta.icon} {meta.label}</span>
-            <span className="text-gray-500 ml-3 text-sm">{agentId} · {envId}</span>
+            <span className={`text-sm ${meta.color}`}>{meta.icon} {meta.label}</span>
+            <span className="text-stone-600 ml-3 text-sm">{agentId} · {envId}</span>
           </div>
-          <button onClick={onClose} className="text-gray-600 hover:text-gray-300 transition-colors">✕</button>
+          <button onClick={onClose} className="text-stone-500 hover:text-stone-700 transition-colors">✕</button>
         </div>
-        <div className="flex gap-4 text-xs text-gray-500">
-          <span>playback <span className="text-gray-300">{meta.fps}</span></span>
-          <span>episodes <span className="text-gray-300">{meta.episodeNote}</span></span>
-          <span className="text-gray-600">{meta.desc}</span>
+        <div className="flex gap-4 text-sm text-stone-600">
+          <span>playback <span className="text-stone-700">{meta.fps}</span></span>
+          <span>episodes <span className="text-stone-700">{meta.episodeNote}</span></span>
+          <span className="text-stone-500">{meta.desc}</span>
         </div>
         <video src={url} controls autoPlay loop
           className={`w-full bg-black object-contain ${isCompact ? "max-h-[40vh]" : "max-h-[60vh]"}`}
           style={(envFamily === "toytext" || envFamily === "atari") ? { imageRendering: "pixelated" } as React.CSSProperties : undefined}>
           Your browser does not support HTML video.
         </video>
-        <p className="text-xs text-gray-700">deterministic policy rollout from saved checkpoint</p>
+        <p className="text-sm text-stone-500">deterministic policy rollout from saved checkpoint</p>
       </div>
     </div>
   );
@@ -760,12 +759,12 @@ function VideoModal({ url, agentId, envId, envFamily, onClose }: {
 // ── Divider helper ────────────────────────────────────────────────────────────
 
 function Divider({ label }: { label?: string }) {
-  if (!label) return <div className="border-t border-[#2a2a2a]" />;
+  if (!label) return <div className="border-t border-stone-200" />;
   return (
     <div className="flex items-center gap-2">
-      <div className="flex-1 border-t border-[#2a2a2a]" />
-      <span className="text-xs text-gray-700 uppercase tracking-widest">{label}</span>
-      <div className="flex-1 border-t border-[#2a2a2a]" />
+      <div className="flex-1 border-t border-stone-200" />
+      <span className="text-sm text-stone-500 uppercase tracking-widest">{label}</span>
+      <div className="flex-1 border-t border-stone-200" />
     </div>
   );
 }
@@ -1029,7 +1028,7 @@ export default function HomePage() {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <div className={`min-h-screen bg-[#0d0d0d] text-gray-200
+    <div className={`min-h-screen bg-[#FAF9F7] text-stone-800
       ${isCentered ? "flex flex-col items-center justify-center p-6 py-12" : "p-6 pt-8"}`}>
 
       {videoModal && (
@@ -1040,13 +1039,13 @@ export default function HomePage() {
 
       {/* ── Header ── */}
       <div className={`flex items-center gap-3 ${isCentered ? "mb-10" : "mb-8"}`}>
-        <span className="text-amber-500 text-xl font-bold">AutoRL</span>
-        <span className="text-[#333]">|</span>
-        <span className="text-gray-600 text-base">multi-agent training race</span>
+        <span className="text-amber-600 text-lg font-bold">AutoRL</span>
+        <span className="text-stone-300">|</span>
+        <span className="text-stone-500 text-sm">multi-agent training race</span>
         {!isCentered && runName && (
           <>
-            <span className="text-[#333]">|</span>
-            <span className="text-gray-600 text-sm">{runName}</span>
+            <span className="text-stone-300">|</span>
+            <span className="text-stone-500 text-sm">{runName}</span>
           </>
         )}
       </div>
@@ -1054,32 +1053,32 @@ export default function HomePage() {
       {/* ── IDLE / ERROR ── */}
       {(phase === "idle" || phase === "error") && (
         <div className="w-full max-w-xl space-y-4">
-          <p className="text-gray-400 text-base">What do you want to train?</p>
-          <div className="relative border border-[#2a2a2a] focus-within:border-amber-600 transition-colors">
+          <p className="text-stone-600 text-sm">What do you want to train?</p>
+          <div className="relative border border-stone-200 focus-within:border-amber-600 transition-colors">
             <textarea ref={textareaRef} autoFocus value={task}
               onChange={e => setTask(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleGeneratePlan(); }}
               rows={3} placeholder="describe the rl task…"
-              className="w-full bg-[#111] px-4 py-3 text-gray-100 placeholder-gray-700 text-base resize-none outline-none" />
-            <p className="absolute bottom-2 right-3 text-xs text-gray-700">⌘ enter</p>
+              className="w-full bg-white px-4 py-3 text-stone-800 placeholder-stone-400 text-sm resize-none outline-none" />
+            <p className="absolute bottom-2 right-3 text-sm text-stone-500">⌘ enter</p>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {SUGGESTIONS.map(s => (
               <button key={s} onClick={() => setTask(s)}
-                className="text-sm px-2.5 py-1 border border-[#2a2a2a] hover:border-amber-700 text-gray-600 hover:text-amber-400 transition-colors">
+                className="text-sm px-2.5 py-1 border border-stone-200 hover:border-amber-700 text-stone-500 hover:text-amber-400 transition-colors">
                 {s}
               </button>
             ))}
           </div>
           {phase === "error" && (
-            <div className="border border-red-900 bg-[#150000] px-4 py-3">
+            <div className="border border-red-300 bg-red-50 px-4 py-3">
               <p className="text-red-400 mb-1 text-sm">error</p>
-              <p className="text-gray-500 text-sm break-all">{errorMsg}</p>
-              <p className="text-gray-700 mt-2 text-xs">backend running? <code>bash ui/agent/start.sh</code></p>
+              <p className="text-stone-600 text-sm break-all">{errorMsg}</p>
+              <p className="text-stone-500 mt-2 text-sm">backend running? <code>bash ui/agent/start.sh</code></p>
             </div>
           )}
           <button onClick={handleGeneratePlan} disabled={!task.trim()}
-            className="w-full bg-amber-600 hover:bg-amber-500 disabled:bg-[#1a1a1a] disabled:text-gray-700 text-black font-bold py-3 transition-colors text-base">
+            className="w-full bg-amber-600 hover:bg-amber-500 disabled:bg-stone-100 disabled:text-stone-400 text-black font-bold py-3 transition-colors text-sm">
             generate lineup →
           </button>
         </div>
@@ -1092,25 +1091,25 @@ export default function HomePage() {
       {phase === "plan_ready" && (
         <div className="w-full max-w-2xl space-y-4">
           <div className="flex items-center justify-between">
-            <span className="text-gray-300 text-base">agent lineup</span>
-            <span className="text-gray-600 text-sm">{runName}</span>
+            <span className="text-stone-700 text-sm">agent lineup</span>
+            <span className="text-stone-500 text-sm">{runName}</span>
           </div>
-          <p className="text-gray-600 text-sm italic">&ldquo;{task}&rdquo;</p>
+          <p className="text-stone-500 text-sm italic">&ldquo;{task}&rdquo;</p>
 
-          <div className="flex gap-4 text-sm text-gray-600">
-            <span><span className="text-gray-200">{plan.length}</span> agents</span>
-            <span><span className="text-gray-200">{plan.filter(e=>e.exec==="local").length}</span> local</span>
-            <span><span className="text-gray-200">{plan.filter(e=>e.exec==="runpod").length}</span> runpod</span>
+          <div className="flex gap-4 text-sm text-stone-500">
+            <span><span className="text-stone-800">{plan.length}</span> agents</span>
+            <span><span className="text-stone-800">{plan.filter(e=>e.exec==="local").length}</span> local</span>
+            <span><span className="text-stone-800">{plan.filter(e=>e.exec==="runpod").length}</span> runpod</span>
           </div>
 
           {plan.some(e => (e.hparams.lr as number) >= 0.1) && (
-            <div className="border border-yellow-900 bg-[#14100a] px-3 py-2 text-xs">
+            <div className="border border-yellow-300 bg-amber-50 px-3 py-2 text-sm">
               <span className="text-yellow-500">sentinel active</span>
-              <span className="text-gray-600 ml-2">one agent has a dangerously high lr — doom loop expected</span>
+              <span className="text-stone-500 ml-2">one agent has a dangerously high lr — doom loop expected</span>
             </div>
           )}
 
-          <p className="text-sm text-gray-700">edit or remove agents before launching</p>
+          <p className="text-sm text-stone-500">edit or remove agents before launching</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {plan.map((e, i) => (
               <AgentLineupCard key={e.id} entry={e} index={i}
@@ -1119,22 +1118,22 @@ export default function HomePage() {
             ))}
           </div>
           {plan.length === 0 && (
-            <p className="text-gray-600 text-sm text-center py-4">all agents removed</p>
+            <p className="text-stone-500 text-sm text-center py-4">all agents removed</p>
           )}
 
-          <div className="border border-[#2a2a2a] bg-[#111] px-4 py-3 space-y-2">
-            <label className="text-xs text-gray-500 uppercase tracking-widest">
+          <div className="border border-stone-200 bg-white px-4 py-3 space-y-2">
+            <label className="text-sm text-stone-600 uppercase tracking-widest">
               huggingface model name (optional)
             </label>
             <input
               value={hfModelName}
               onChange={e => setHfModelName(e.target.value)}
               placeholder="e.g. my-pong-champion"
-              className="w-full bg-[#0a0a0a] border border-[#333] text-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-amber-700"
+              className="w-full bg-[#FFFCF8] border border-stone-300 text-stone-800 px-3 py-2 text-sm focus:outline-none focus:border-amber-700"
             />
-            <p className="text-xs text-gray-600">
+            <p className="text-sm text-stone-500">
               repo will be named{" "}
-              <span className="font-mono text-gray-400">
+              <span className="font-mono text-stone-600">
                 autorl-{hfModelName.trim()
                   ? hfModelName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "model"
                   : "algo-env"}-YYYYMMDD-HHMMSS
@@ -1144,11 +1143,11 @@ export default function HomePage() {
 
           <div className="flex gap-2 pt-1">
             <button onClick={handleReset}
-              className="flex-1 border border-[#333] hover:border-gray-500 text-gray-500 hover:text-gray-300 py-3 text-base transition-colors">
+              className="flex-1 border border-stone-300 hover:border-stone-400 text-stone-600 hover:text-stone-700 py-3 text-sm transition-colors">
               ← back
             </button>
             <button onClick={handleLaunch} disabled={plan.length === 0}
-              className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:bg-[#1a1a1a] disabled:text-gray-700 text-black font-bold py-3 text-base transition-colors">
+              className="flex-1 bg-amber-600 hover:bg-amber-500 disabled:bg-stone-100 disabled:text-stone-400 text-black font-bold py-3 text-sm transition-colors">
               launch race ({plan.length})
             </button>
           </div>
@@ -1158,8 +1157,8 @@ export default function HomePage() {
       {/* ── LAUNCHING ── */}
       {phase === "launching" && (
         <div className="text-center space-y-3">
-          <p className="text-amber-400 animate-pulse text-base">launching {plan.length} agents…</p>
-          <p className="text-gray-700 text-sm">swarm runner starting</p>
+          <p className="text-amber-400 animate-pulse text-sm">launching {plan.length} agents…</p>
+          <p className="text-stone-500 text-sm">swarm runner starting</p>
         </div>
       )}
 
@@ -1167,20 +1166,20 @@ export default function HomePage() {
       {phase === "racing" && (
         <div className="w-full max-w-7xl">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3 text-base">
+            <div className="flex items-center gap-3 text-sm">
               <span className="text-green-400 animate-pulse">●</span>
-              <span className="text-gray-200">race live</span>
-              <span className="text-gray-600 text-sm">
+              <span className="text-stone-800">race live</span>
+              <span className="text-stone-500 text-sm">
                 {heartbeats.filter(h=>h.status==="training").length} running ·{" "}
                 {heartbeats.filter(h=>h.status==="completed").length} done
               </span>
             </div>
             <button onClick={handleReset}
-              className="text-sm border border-[#333] hover:border-red-900 text-gray-500 hover:text-red-400 px-3 py-1.5 transition-colors">
+              className="text-sm border border-stone-300 hover:border-red-300 text-stone-600 hover:text-red-400 px-3 py-1.5 transition-colors">
               × stop &amp; reset
             </button>
           </div>
-          <p className="text-gray-700 text-sm italic mb-4">&ldquo;{task}&rdquo;</p>
+          <p className="text-stone-500 text-sm italic mb-4">&ldquo;{task}&rdquo;</p>
 
           <div className="flex gap-5 items-start">
             <div className="flex-1 min-w-0 space-y-3 max-h-[calc(100vh-200px)] overflow-y-auto pr-1">
@@ -1203,9 +1202,9 @@ export default function HomePage() {
                   {sentinel.map((e, i) => <SentinelBanner key={i} entry={e} />)}
                 </div>
               )}
-              <p className="text-gray-700 text-xs text-center py-2">polling every 2 s</p>
+              <p className="text-stone-500 text-sm text-center py-2">polling every 2 s</p>
             </div>
-            <div className="w-72 xl:w-80 shrink-0 sticky top-6 border border-[#2a2a2a] bg-[#111] p-4">
+            <div className="w-72 xl:w-80 shrink-0 sticky top-6 border border-stone-200 bg-white p-4">
               <Leaderboard plan={plan} heartbeats={heartbeats} results={[]} sentinel={sentinel} phase="racing" />
             </div>
           </div>
@@ -1216,9 +1215,9 @@ export default function HomePage() {
       {phase === "done" && (
         <div className="w-full max-w-7xl">
           <div className="flex items-center justify-between mb-4">
-            <span className="text-amber-400 text-base">race complete</span>
+            <span className="text-amber-400 text-sm">race complete</span>
             <button onClick={handleReset}
-              className="text-sm border border-[#333] hover:border-amber-600 text-gray-500 hover:text-amber-400 px-3 py-1.5 transition-colors">
+              className="text-sm border border-stone-300 hover:border-amber-600 text-stone-600 hover:text-amber-400 px-3 py-1.5 transition-colors">
               ← train again
             </button>
           </div>
@@ -1228,16 +1227,16 @@ export default function HomePage() {
 
               {/* winner panel */}
               {best && (
-                <div className="border border-amber-900/50 bg-[#14100a] text-sm">
-                  <div className="px-4 py-3 border-b border-[#2a2a2a] flex items-center justify-between">
+                <div className="border border-amber-300/50 bg-amber-50 text-sm">
+                  <div className="px-4 py-3 border-b border-stone-200 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <span className="text-amber-400">▶ winner</span>
                       <span className={`border px-2 py-0.5 ${as(best.algo).tag}`}>{best.algo}</span>
-                      <span className="text-gray-400">{best.env}</span>
-                      <span className="text-gray-600">{best.agent_id}</span>
+                      <span className="text-stone-600">{best.env}</span>
+                      <span className="text-stone-500">{best.agent_id}</span>
                     </div>
                     <button onClick={() => handleInfer(best.agent_id)} disabled={!!inferring[best.agent_id]}
-                      className="border border-[#333] hover:border-amber-600 text-gray-500 hover:text-amber-400 px-2.5 py-1 transition-colors disabled:opacity-40">
+                      className="border border-stone-300 hover:border-amber-600 text-stone-600 hover:text-amber-400 px-2.5 py-1 transition-colors disabled:opacity-40">
                       {inferring[best.agent_id]
                         ? (best.algo === "GRPO" ? "⏳ Loading…" : "⏳ Recording…")
                         : (best.algo === "GRPO"
@@ -1245,30 +1244,30 @@ export default function HomePage() {
                           : "▶ Watch inference")}
                     </button>
                   </div>
-                  <div className="px-4 py-3 flex gap-8 border-b border-[#1a1a1a]">
+                  <div className="px-4 py-3 flex gap-8 border-b border-stone-100">
                     <span>mean return <span className="text-amber-400 font-bold">{best.mean_return.toFixed(2)}</span></span>
-                    <span>std <span className="text-gray-300">±{best.std_return.toFixed(2)}</span></span>
+                    <span>std <span className="text-stone-700">±{best.std_return.toFixed(2)}</span></span>
                   </div>
 
                   {wandbArtifacts[best.agent_id] && (
-                    <p className="px-4 py-2 text-gray-600 border-b border-[#1a1a1a]">
+                    <p className="px-4 py-2 text-stone-500 border-b border-stone-100">
                       artifact: <span className="text-violet-400">{wandbArtifacts[best.agent_id]}</span>
                     </p>
                   )}
 
                   {hfRepoUrl && (
-                    <div className="px-4 py-3 border-b border-[#1a1a1a] space-y-1">
+                    <div className="px-4 py-3 border-b border-stone-100 space-y-1">
                       {(hfModelName || hfPushedAt) && (
-                        <p className="text-xs text-gray-600">
-                          {hfModelName && <>name: <span className="text-gray-300">{hfModelName}</span></>}
+                        <p className="text-sm text-stone-500">
+                          {hfModelName && <>name: <span className="text-stone-700">{hfModelName}</span></>}
                           {hfModelName && hfPushedAt && " · "}
                           {hfPushedAt && <>pushed {hfPushedAt}</>}
                         </p>
                       )}
                       <div className="flex items-center justify-between">
-                        <span className="text-gray-400 truncate">{hfRepoUrl}</span>
+                        <span className="text-stone-600 truncate">{hfRepoUrl}</span>
                         <a href={hfRepoUrl} target="_blank" rel="noopener noreferrer"
-                          className="ml-3 shrink-0 border border-[#333] hover:border-amber-600 text-gray-500 hover:text-amber-400 px-2.5 py-1 transition-colors">
+                          className="ml-3 shrink-0 border border-stone-300 hover:border-amber-600 text-stone-600 hover:text-amber-400 px-2.5 py-1 transition-colors">
                           view ↗
                         </a>
                       </div>
@@ -1277,23 +1276,23 @@ export default function HomePage() {
 
                   {hfSnippet && (
                     <div>
-                      <div className="px-4 py-2 border-b border-[#1a1a1a] flex items-center justify-between">
-                        <span className="text-gray-600">standalone usage</span>
+                      <div className="px-4 py-2 border-b border-stone-100 flex items-center justify-between">
+                        <span className="text-stone-500">standalone usage</span>
                         <button onClick={() => {
                           navigator.clipboard.writeText(hfSnippet).then(() => {
                             setSnippetCopied(true);
                             setTimeout(() => setSnippetCopied(false), 2000);
                           });
-                        }} className="text-xs border border-[#333] hover:border-amber-600 text-gray-600 hover:text-amber-400 px-2 py-0.5 transition-colors">
+                        }} className="text-sm border border-stone-300 hover:border-amber-600 text-stone-500 hover:text-amber-400 px-2 py-0.5 transition-colors">
                           {snippetCopied ? "copied" : "copy"}
                         </button>
                       </div>
-                      <pre className="px-4 py-3 text-gray-400 overflow-x-auto max-h-48 leading-relaxed text-xs">{hfSnippet}</pre>
+                      <pre className="px-4 py-3 text-stone-600 overflow-x-auto max-h-48 leading-relaxed text-sm">{hfSnippet}</pre>
                     </div>
                   )}
 
                   {history[best.agent_id]?.length >= 2 && (
-                    <div className="border-t border-[#1a1a1a] px-2 py-1.5">
+                    <div className="border-t border-stone-100 px-2 py-1.5">
                       <MiniChart history={history[best.agent_id]} algoRgb={as(best.algo).rgb} hasNaN={false}
                         family={detectEnvFamily(best.env)} env={best.env} />
                     </div>
@@ -1335,7 +1334,7 @@ export default function HomePage() {
               )}
             </div>
 
-            <div className="w-72 xl:w-80 shrink-0 sticky top-6 border border-[#2a2a2a] bg-[#111] p-4">
+            <div className="w-72 xl:w-80 shrink-0 sticky top-6 border border-stone-200 bg-white p-4">
               <Leaderboard plan={plan} heartbeats={heartbeats} results={results} sentinel={sentinel} phase="done" />
             </div>
           </div>
