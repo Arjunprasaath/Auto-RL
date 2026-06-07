@@ -397,6 +397,32 @@ async def stream_run(run_name: str, request: Request):
     return EventSourceResponse(generator())
 
 
+@app.post("/api/cancel/{run_name}")
+async def cancel_run(run_name: str) -> dict:
+    """Kill all running training subprocesses for the given run.
+
+    Called by the UI when the user clicks Reset while a race is in progress.
+    Returns the list of agent IDs that were terminated.
+    """
+    from agents.training_agent import PROCESSES, kill_training_agent
+
+    # Find agents that belong to this run (all currently live processes)
+    killed: list[str] = []
+    agent_ids = list(PROCESSES.keys())
+    for agent_id in agent_ids:
+        ok = await kill_training_agent(agent_id)
+        if ok:
+            killed.append(agent_id)
+
+    # Mark the run as cancelled in the in-memory store
+    if run_name in _runs:
+        _runs[run_name]["status"] = "cancelled"
+        _save_run(run_name)
+
+    print(f"[cancel] run={run_name} killed={killed}")
+    return {"cancelled": killed}
+
+
 @app.get("/api/results/{run_name}")
 def get_results(run_name: str) -> dict:
     """Return final eval results + best checkpoint once the swarm is done."""

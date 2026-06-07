@@ -253,24 +253,54 @@ function PlanningScreen({ task }: { task: string }) {
   );
 }
 
-// ── Pre-launch agent card ─────────────────────────────────────────────────────
+// ── Pre-launch editable agent card ───────────────────────────────────────────
 
-function AgentLineupCard({ entry, index }: { entry: SpawnEntry; index: number }) {
+function AgentLineupCard({
+  entry, index, onDelete, onUpdate,
+}: {
+  entry: SpawnEntry;
+  index: number;
+  onDelete: () => void;
+  onUpdate: (updated: SpawnEntry) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<SpawnEntry>(entry);
+
   const st = as(entry.algo);
   const lr = entry.hparams.lr as number;
   const isDoom = lr >= 0.1;
   const family = detectEnvFamily(entry.env);
   const fmeta  = ENV_FAMILY_META[family];
-  const hparams: [string, string][] = [
-    ["lr", String(lr)],
-    ["seed", String(entry.hparams.seed ?? "—")],
-    ...(entry.hparams.n_steps != null ? [["n_steps", String(entry.hparams.n_steps)] as [string,string]] : []),
-    ...(entry.hparams.gamma   != null ? [["gamma",   String(entry.hparams.gamma)]   as [string,string]] : []),
-    ...(entry.hparams.ent_coef!= null ? [["ent_coef",String(entry.hparams.ent_coef)]as [string,string]] : []),
-    ...(entry.hparams.model   != null ? [["model",   String(entry.hparams.model).split("/").pop() ?? ""] as [string,string]] : []),
+
+  const displayHparams: [string, string][] = [
+    ["lr",     String(entry.hparams.lr)],
+    ["seed",   String(entry.hparams.seed ?? "—")],
+    ...(entry.hparams.n_steps  != null ? [["n_steps",  String(entry.hparams.n_steps)]  as [string,string]] : []),
+    ...(entry.hparams.gamma    != null ? [["gamma",    String(entry.hparams.gamma)]    as [string,string]] : []),
+    ...(entry.hparams.ent_coef != null ? [["ent_coef", String(entry.hparams.ent_coef)] as [string,string]] : []),
+    ...(entry.hparams.model    != null ? [["model",    String(entry.hparams.model).split("/").pop() ?? ""] as [string,string]] : []),
   ];
+
+  function setHp(key: string, raw: string) {
+    const num = parseFloat(raw);
+    setDraft(d => ({ ...d, hparams: { ...d.hparams, [key]: isNaN(num) ? raw : num } }));
+  }
+
+  function saveEdits() {
+    onUpdate(draft);
+    setEditing(false);
+  }
+
+  function cancelEdits() {
+    setDraft(entry);
+    setEditing(false);
+  }
+
+  const EDITABLE_HPARAMS = ["lr", "seed", "n_steps", "gamma", "ent_coef", "time_budget_min"] as const;
+
   return (
     <div className={`bg-gray-900 border-l-4 ${st.border} rounded-xl p-4 space-y-3 ${isDoom ? "ring-1 ring-red-800/60" : ""}`}>
+      {/* Header row */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-mono text-gray-500">#{index + 1}</span>
@@ -278,21 +308,85 @@ function AgentLineupCard({ entry, index }: { entry: SpawnEntry; index: number })
           <span className={`text-xs px-1.5 py-0.5 rounded-full bg-gray-800 border border-gray-700 ${fmeta.color}`}>
             {fmeta.icon} {fmeta.label}
           </span>
-          {entry.exec === "runpod" && <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-900/60 text-yellow-400 border border-yellow-800/50">RunPod GPU</span>}
-          {isDoom && <span className="text-xs px-2 py-0.5 rounded-full bg-red-900/60 text-red-400 border border-red-800/50">☠ doom bait</span>}
+          {entry.exec === "runpod" && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-900/60 text-yellow-400 border border-yellow-800/50">RunPod GPU</span>
+          )}
+          {isDoom && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-red-900/60 text-red-400 border border-red-800/50">☠ doom bait</span>
+          )}
         </div>
-        <span className="text-xs text-gray-500 shrink-0">{entry.time_budget_min} min</span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="text-xs text-gray-500">{entry.time_budget_min} min</span>
+          <button
+            onClick={() => { setDraft(entry); setEditing(e => !e); }}
+            className="text-xs px-2 py-0.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 border border-gray-700 transition-colors">
+            {editing ? "✕" : "Edit"}
+          </button>
+          <button
+            onClick={onDelete}
+            className="text-xs px-2 py-0.5 rounded-lg bg-red-950/60 hover:bg-red-900/60 text-red-400 border border-red-900/50 transition-colors">
+            Delete
+          </button>
+        </div>
       </div>
+
       <p className="text-sm font-semibold text-gray-200 truncate">{entry.env}</p>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-        {hparams.map(([k, v]) => (
-          <div key={k} className="flex items-center gap-1.5">
-            <span className="text-xs text-gray-500 w-16 shrink-0">{k}</span>
-            <span className={`text-xs font-mono ${k === "lr" && isDoom ? "text-red-400 font-bold" : "text-gray-300"}`}>{v}</span>
+
+      {/* View mode */}
+      {!editing && (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+          {displayHparams.map(([k, v]) => (
+            <div key={k} className="flex items-center gap-1.5">
+              <span className="text-xs text-gray-500 w-16 shrink-0">{k}</span>
+              <span className={`text-xs font-mono ${k === "lr" && isDoom ? "text-red-400 font-bold" : "text-gray-300"}`}>{v}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Edit mode */}
+      {editing && (
+        <div className="space-y-3 border-t border-gray-800 pt-3">
+          <p className="text-xs text-gray-500 font-semibold uppercase tracking-wider">Edit hyperparameters</p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+            {/* time_budget_min always editable */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-gray-500 w-20 shrink-0">budget (min)</label>
+              <input type="number" step="1" min="1" max="30"
+                value={draft.time_budget_min}
+                onChange={e => setDraft(d => ({ ...d, time_budget_min: parseInt(e.target.value) || d.time_budget_min }))}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs font-mono text-gray-200 outline-none focus:border-violet-500" />
+            </div>
+            {/* numeric hparams */}
+            {(["lr", "seed", "gamma", "ent_coef", "n_steps"] as const)
+              .filter(k => draft.hparams[k] != null)
+              .map(k => (
+                <div key={k} className="flex items-center gap-2">
+                  <label className="text-xs text-gray-500 w-20 shrink-0">{k}</label>
+                  <input type="number"
+                    step={k === "seed" ? "1" : k === "n_steps" ? "256" : "any"}
+                    value={String(draft.hparams[k])}
+                    onChange={e => setHp(k, e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-xs font-mono text-gray-200 outline-none focus:border-violet-500" />
+                </div>
+              ))}
           </div>
-        ))}
-      </div>
-      {isDoom && <p className="text-xs text-red-400 border-t border-red-900/40 pt-2">Sentinel will intercept — expects NaN loss</p>}
+          <div className="flex gap-2 pt-1">
+            <button onClick={saveEdits}
+              className="flex-1 bg-violet-700 hover:bg-violet-600 text-white text-xs font-semibold py-1.5 rounded-lg transition-colors">
+              Save
+            </button>
+            <button onClick={cancelEdits}
+              className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs font-semibold py-1.5 rounded-lg transition-colors">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isDoom && !editing && (
+        <p className="text-xs text-red-400 border-t border-red-900/40 pt-2">Sentinel will intercept — expects NaN loss</p>
+      )}
     </div>
   );
 }
@@ -1089,6 +1183,10 @@ export default function HomePage() {
 
   const handleReset = () => {
     stopLive();
+    // Kill any running training subprocesses on the backend
+    if (runName) {
+      fetch(`${BACKEND}/api/cancel/${runName}`, { method: "POST" }).catch(() => {});
+    }
     localStorage.removeItem("autorl_active_run");
     setPhase("idle"); setTask(""); setPlan([]); setRunName(""); setRunDir("");
     setHeartbeats([]); setSentinel([]); setResults([]); setBest(null); setErrorMsg("");
@@ -1185,17 +1283,31 @@ export default function HomePage() {
               </div>
             </div>
           )}
+          <p className="text-xs text-gray-500">You can edit or remove agents before launching. Changes only affect this run.</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {plan.map((e, i) => <AgentLineupCard key={e.id} entry={e} index={i} />)}
+            {plan.map((e, i) => (
+              <AgentLineupCard
+                key={e.id}
+                entry={e}
+                index={i}
+                onDelete={() => setPlan(p => p.filter(a => a.id !== e.id))}
+                onUpdate={updated => setPlan(p => p.map(a => a.id === updated.id ? updated : a))}
+              />
+            ))}
           </div>
+          {plan.length === 0 && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center text-sm text-gray-500">
+              All agents removed. Go back and try a different task.
+            </div>
+          )}
           <div className="flex gap-3 pt-1">
             <button onClick={handleReset}
               className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-400 font-semibold py-3 rounded-xl transition-colors text-sm">
               ← Change task
             </button>
-            <button onClick={handleLaunch}
-              className="flex-1 bg-violet-600 hover:bg-violet-500 text-white font-semibold py-3 rounded-xl transition-colors text-sm">
-              🚀 Launch Race
+            <button onClick={handleLaunch} disabled={plan.length === 0}
+              className="flex-1 bg-violet-600 hover:bg-violet-500 disabled:bg-gray-800 disabled:text-gray-600 text-white font-semibold py-3 rounded-xl transition-colors text-sm">
+              Launch Race ({plan.length} agent{plan.length !== 1 ? "s" : ""})
             </button>
           </div>
         </div>
@@ -1361,7 +1473,7 @@ export default function HomePage() {
                   )}
                   {history[best.agent_id]?.length >= 2 && (
                     <div className="bg-black/20 rounded-lg p-2">
-                      <MiniChart history={history[best.agent_id]} algoRgb={as(best.algo).rgb} hasNaN={false} />
+                      <MiniChart history={history[best.agent_id]} algoRgb={as(best.algo).rgb} hasNaN={false} family={detectEnvFamily(best.env)} env={best.env} />
                     </div>
                   )}
                 </div>
