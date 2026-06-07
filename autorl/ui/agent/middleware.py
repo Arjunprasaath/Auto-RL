@@ -110,6 +110,7 @@ class RunRequest(BaseModel):
     task: str
     run_dir: str
     plan: list[dict]
+    hf_model_name: str | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -176,6 +177,16 @@ def _read_sentinel_log(run_dir: str) -> list[dict]:
     return []
 
 
+def _read_doctor_log(run_dir: str) -> list[dict]:
+    log_path = Path(run_dir) / "doctor_log.json"
+    if log_path.exists():
+        try:
+            return json.loads(log_path.read_text())
+        except Exception:
+            pass
+    return []
+
+
 def _infer_disk_status(plan: list[dict], heartbeats: list[dict], results: list[dict]) -> str:
     """Infer run status from files so UI survives backend reloads."""
     planned_ids = {entry.get("id") for entry in plan if entry.get("id")}
@@ -209,6 +220,7 @@ def _disk_run_snapshot(run_name: str) -> dict[str, Any] | None:
     heartbeats = _read_heartbeats(str(run_dir))
     results = _read_results(str(run_dir))
     sentinel_log = _read_sentinel_log(str(run_dir))
+    doctor_log = _read_doctor_log(str(run_dir))
 
     if not plan and not heartbeats and not results:
         return None
@@ -221,6 +233,7 @@ def _disk_run_snapshot(run_name: str) -> dict[str, Any] | None:
         "results": results,
         "heartbeats": heartbeats,
         "sentinel_log": sentinel_log,
+        "doctor_log": doctor_log,
     }
 
 
@@ -276,9 +289,17 @@ async def start_run(req: RunRequest) -> dict:
             "plan": req.plan,
             "status": "running",
             "results": [],
+            "hf_model_name": (req.hf_model_name or "").strip(),
         }
     else:
         _runs[run_name]["status"] = "running"
+        _runs[run_name]["plan"] = req.plan
+        if req.hf_model_name:
+            _runs[run_name]["hf_model_name"] = req.hf_model_name.strip()
+    # Persist the user-approved plan (may be smaller than the original lineup)
+    plan_path = os.path.join(req.run_dir, "spawn_plan.json")
+    with open(plan_path, "w") as f:
+        json.dump(req.plan, f, indent=2)
     _save_run(run_name)
 
     async def _run_and_store() -> None:
@@ -305,7 +326,10 @@ async def start_run(req: RunRequest) -> dict:
             best_for_hf = max(valid_results, key=lambda r: r.mean_return) if valid_results else None
             if best_for_hf and best_for_hf.checkpoint_path and os.path.exists(best_for_hf.checkpoint_path):
                 try:
+                    from datetime import datetime, timezone
                     from training.hf_utils import push_model_to_hub
+                    hf_name = _runs[run_name].get("hf_model_name") or None
+                    pushed_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                     hf_url, hf_snippet = push_model_to_hub(
                         model_path=best_for_hf.checkpoint_path,
                         agent_id=best_for_hf.agent_id,
@@ -314,9 +338,12 @@ async def start_run(req: RunRequest) -> dict:
                         mean_return=best_for_hf.mean_return,
                         std_return=best_for_hf.std_return,
                         steps_trained=best_for_hf.steps_trained,
+                        model_name=hf_name,
+                        pushed_at=pushed_at,
                     )
                     _runs[run_name]["hf_repo_url"] = hf_url
                     _runs[run_name]["hf_code_snippet"] = hf_snippet
+                    _runs[run_name]["hf_pushed_at"] = pushed_at
                     print(f"[backend] HF push done → {hf_url}")
                 except Exception as hf_err:
                     print(f"[backend] HF push skipped ({hf_err})")
@@ -351,7 +378,7 @@ def get_status(run_name: str) -> dict:
             raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
 
     if disk and (not run or disk["status"] == "completed"):
-        _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log")}
+        _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log", "doctor_log")}
         run = _runs[run_name]
 
     run_dir = run["run_dir"]
@@ -361,6 +388,7 @@ def get_status(run_name: str) -> dict:
         disk["heartbeats"] if disk else _read_heartbeats(run_dir)
     )
     sentinel_log = disk["sentinel_log"] if disk else _read_sentinel_log(run_dir)
+    doctor_log = disk["doctor_log"] if disk else _read_doctor_log(run_dir)
 
     return {
         "run_name": run_name,
@@ -368,6 +396,7 @@ def get_status(run_name: str) -> dict:
         "plan": run["plan"],
         "heartbeats": heartbeats,
         "sentinel_log": sentinel_log,
+        "doctor_log": doctor_log,
     }
 
 
@@ -432,12 +461,13 @@ def get_results(run_name: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
 
     if disk and (not run or disk["status"] == "completed"):
-        _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log")}
+        _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log", "doctor_log")}
         run = _runs[run_name]
 
     run_dir = run["run_dir"]
     results = disk["results"] if disk else _read_results(run_dir)
     sentinel_log = disk["sentinel_log"] if disk else _read_sentinel_log(run_dir)
+    doctor_log = disk["doctor_log"] if disk else _read_doctor_log(run_dir)
 
     # Pick best by mean_return.
     # Include early_stopped and race_dropout — these ran evaluate_policy and have
@@ -453,8 +483,11 @@ def get_results(run_name: str) -> dict:
         "best": best,
         "rankings": run.get("rankings", {}),
         "sentinel_log": sentinel_log,
+        "doctor_log": doctor_log,
         "hf_repo_url": run.get("hf_repo_url", ""),
         "hf_code_snippet": run.get("hf_code_snippet", ""),
+        "hf_model_name": run.get("hf_model_name", ""),
+        "hf_pushed_at": run.get("hf_pushed_at", ""),
     }
 
 

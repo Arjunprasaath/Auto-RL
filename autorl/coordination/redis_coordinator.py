@@ -64,17 +64,34 @@ class RedisCoordinator:
 
     def __init__(self) -> None:
         self._redis_url: str | None = os.environ.get("REDIS_URL")
+        if os.environ.get("REDIS_DISABLED"):
+            self._redis_url = None
         self._client = None          # sync redis.Redis
         self._async_client = None    # async redis.asyncio.Redis
+        self._disabled = False       # set True after first unrecoverable failure
+        self._warned: set[str] = set()
+
+    def _disable(self, reason: str) -> None:
+        """Stop all Redis attempts for this process — file fallback takes over."""
+        if not self._disabled:
+            print(f"[coordinator] Redis disabled ({reason}) — using file fallback")
+        self._disabled = True
+        self._client = None
+        self._async_client = None
+
+    def _log_once(self, key: str, msg: str) -> None:
+        if key not in self._warned:
+            self._warned.add(key)
+            print(msg)
 
     # ── Internal connection helpers ───────────────────────────────────────────
 
     def _sync(self):
         """Return a synchronous Redis client, connecting lazily."""
+        if self._disabled or not self._redis_url:
+            return None
         if self._client is not None:
             return self._client
-        if not self._redis_url:
-            return None
         try:
             import redis as _redis
             self._client = _redis.from_url(
@@ -84,18 +101,17 @@ class RedisCoordinator:
                 socket_timeout=3,
             )
             self._client.ping()
-            print(f"[coordinator] connected to Redis at {self._redis_url}")
+            print(f"[coordinator] connected to Redis")
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] Redis unavailable ({e}) — using file fallback")
-            self._client = None
+            self._disable(str(e))
         return self._client
 
     def _async_redis(self):
         """Return an async Redis client, connecting lazily."""
+        if self._disabled or not self._redis_url:
+            return None
         if self._async_client is not None:
             return self._async_client
-        if not self._redis_url:
-            return None
         try:
             import redis.asyncio as _aredis
             self._async_client = _aredis.from_url(
@@ -105,7 +121,7 @@ class RedisCoordinator:
                 socket_timeout=3,
             )
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] async Redis unavailable ({e})")
+            self._log_once("async_connect", f"[coordinator] async Redis unavailable ({e})")
             self._async_client = None
         return self._async_client
 
@@ -125,7 +141,8 @@ class RedisCoordinator:
             r.set(_hb_key(run_id, agent_id), payload, ex=300)   # 5-min TTL
             r.publish(_hb_channel(run_id), payload)
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] publish_heartbeat failed ({e})")
+            self._disable(str(e))
+            self._log_once("publish_heartbeat", f"[coordinator] publish_heartbeat failed ({e})")
 
     def get_all_heartbeats(self, run_id: str) -> dict[str, dict]:
         """Return the latest heartbeat for every agent in a run."""
@@ -145,7 +162,8 @@ class RedisCoordinator:
                     result[agent_id] = json.loads(raw)
             return result
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] get_all_heartbeats failed ({e})")
+            self._disable(str(e))
+            self._log_once("get_all_heartbeats", f"[coordinator] get_all_heartbeats failed ({e})")
             return {}
 
     async def subscribe_heartbeats(self, run_id: str) -> AsyncGenerator[dict, None]:
@@ -185,7 +203,8 @@ class RedisCoordinator:
         except asyncio.CancelledError:
             pass
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] subscribe_heartbeats error ({e})")
+            self._log_once("subscribe", f"[coordinator] subscribe_heartbeats error ({e})")
+            yield {"_no_redis": True}
         finally:
             try:
                 await pubsub.unsubscribe(_hb_channel(run_id))
@@ -203,7 +222,8 @@ class RedisCoordinator:
         try:
             r.set(_nudge_key(run_id, agent_id), json.dumps(nudge), ex=600)
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] push_nudge failed ({e})")
+            self._disable(str(e))
+            self._log_once("push_nudge", f"[coordinator] push_nudge failed ({e})")
 
     def pop_nudge(self, run_id: str, agent_id: str) -> dict | None:
         """Atomically read and delete a pending nudge. Returns None if absent."""
@@ -218,7 +238,8 @@ class RedisCoordinator:
             raw, _ = pipe.execute()
             return json.loads(raw) if raw else None
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] pop_nudge failed ({e})")
+            self._disable(str(e))
+            self._log_once("pop_nudge", f"[coordinator] pop_nudge failed ({e})")
             return None
 
     # ── Run state ─────────────────────────────────────────────────────────────
@@ -231,7 +252,8 @@ class RedisCoordinator:
         try:
             r.set(_run_key(run_id), json.dumps(state), ex=86400)  # 24-hr TTL
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] set_run_state failed ({e})")
+            self._disable(str(e))
+            self._log_once("set_run_state", f"[coordinator] set_run_state failed ({e})")
 
     def get_run_state(self, run_id: str) -> dict | None:
         """Recover persisted run state. Returns None if not found."""
@@ -242,7 +264,8 @@ class RedisCoordinator:
             raw = r.get(_run_key(run_id))
             return json.loads(raw) if raw else None
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] get_run_state failed ({e})")
+            self._disable(str(e))
+            self._log_once("get_run_state", f"[coordinator] get_run_state failed ({e})")
             return None
 
     def list_run_ids(self) -> list[str]:
@@ -292,7 +315,8 @@ class RedisCoordinator:
             pipe.expire(key, 7 * 86400)          # 7-day TTL
             pipe.execute()
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] record_run_result failed ({e})")
+            self._disable(str(e))
+            self._log_once("record_run_result", f"[coordinator] record_run_result failed ({e})")
 
     def get_run_history(self, algo: str, env: str, top_n: int = 5) -> list[dict]:
         """Return up to top_n past results for the given algo+env, best-first.
@@ -313,7 +337,7 @@ class RedisCoordinator:
                 result.append(entry)
             return result
         except Exception as e:  # noqa: BLE001
-            print(f"[coordinator] get_run_history failed ({e})")
+            self._log_once("get_run_history", f"[coordinator] get_run_history failed ({e})")
             return []
 
     def get_best_peer_reward(self, run_id: str, my_agent_id: str) -> float | None:

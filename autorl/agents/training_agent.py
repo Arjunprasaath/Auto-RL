@@ -128,9 +128,7 @@ async def run_training_agent(
 
         code, stderr_text = await _launch()
 
-        # Iterative doctor loop: diagnose → fix → retry → repeat until success
-        # or MAX_DOCTOR_ITERATIONS exhausted.
-        # NaN/divergence errors are owned by the Doom Loop Sentinel — skip them here.
+        # Env doctor: only for missing deps / setup errors. NaN & divergence → Sentinel.
         MAX_DOCTOR_ITERATIONS = 3
         already_tried: set[str] = set()
 
@@ -139,11 +137,10 @@ async def run_training_agent(
                 break
             if not stderr_text:
                 break
-            from agents.env_doctor_agent import diagnose_and_fix, is_training_divergence
-            if is_training_divergence(stderr_text):
-                print(f"[{entry.id}] training divergence in stderr — Sentinel will handle, skipping doctor")
+            from agents.env_doctor_agent import diagnose_and_fix, is_environment_error
+            if not is_environment_error(stderr_text):
                 break
-            print(f"[{entry.id}] doctor iteration {attempt}/{MAX_DOCTOR_ITERATIONS}")
+            print(f"[{entry.id}] env-doctor iteration {attempt}/{MAX_DOCTOR_ITERATIONS}")
             result = diagnose_and_fix(
                 stderr_text,
                 entry.id,
@@ -152,9 +149,9 @@ async def run_training_agent(
                 attempt=attempt,
             )
             if not result.fixed:
-                print(f"[{entry.id}] doctor could not fix after attempt {attempt}")
+                print(f"[{entry.id}] env-doctor could not fix after attempt {attempt}")
                 break
-            print(f"[{entry.id}] doctor attempt {attempt} applied fixes {result.commands} — retrying")
+            print(f"[{entry.id}] env-doctor attempt {attempt} applied fixes {result.commands} — retrying")
             code, stderr_text = await _launch(retry=True)
 
         if code != 0:

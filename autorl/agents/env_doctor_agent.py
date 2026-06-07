@@ -12,10 +12,10 @@ Workflow
 4. Run each command sequentially in the real terminal; stop on first failure.
 5. Return DoctorResult — the caller (training_agent.py) retries the subprocess and
    calls back again if it still fails, up to MAX_DOCTOR_ITERATIONS total rounds.
-6. Each attempt is appended to sentinel_log.json so the UI shows the full history.
+6. Each attempt is appended to doctor_log.json (separate from sentinel_log.json).
 
-Only shell commands that install or configure the environment are permitted.
-The agent NEVER modifies source files.
+Only runs when stderr matches environment-setup patterns (missing packages, etc.).
+NaN loss and training divergence are handled exclusively by the Doom Loop Sentinel.
 """
 
 from __future__ import annotations
@@ -51,26 +51,62 @@ MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 # packages land in the correct venv, not the system Python.
 _PIP = f"{sys.executable} -m pip install --quiet"
 
-# ── Training-divergence patterns — owned by the Sentinel, skip the doctor ─────
-# These are numerical training failures, not environment setup errors.
+# ── Training-divergence patterns — owned by the Sentinel, never the doctor ────
 _DIVERGENCE_PATTERNS = [
-    r"nan",
-    r"inf(?:inity)?",
+    r"\bnan\b",
+    r"\binf(?:inity)?\b",
     r"gradient.*explod",
     r"loss.*overflow",
     r"value.*error.*nan",
     r"floating.?point.*overflow",
+    r"anomaly.*nan",
+    r"nan_loss",
+]
+
+# ── Environment-setup patterns — only these trigger the doctor ────────────────
+# Whitelist: if stderr doesn't match any of these, the doctor stays out.
+_ENV_PATTERNS = [
+    r"ModuleNotFoundError",
+    r"No module named",
+    r"ImportError",
+    r"NamespaceNotFound",
+    r"Namespace .* not found",
+    r"DependencyNotInstalled",
+    r"Have you installed",
+    r"proper package for",
+    r"Could not find module",
+    r"DLL load failed",
+    r"shared object file.*No such file",
+    r"command not found",
+    r"RuntimeError.*FFmpeg",
+    r"No module named 'OpenGL'",
+    r"pyglet.*display",
+    r"GLFW.*error",
+    r"CUDA.*not available",
+    r"device.*cuda.*not found",
+    r"No space left on device",
+    r"Permission denied",
+    r"cannot import name.*from",
+    r"incompatible.*version",
+    r"wandb.*version.*incompatible",
 ]
 
 
 def is_training_divergence(stderr: str) -> bool:
-    """Return True when stderr looks like a numerical training failure.
-
-    These errors are handled by the Doom Loop Sentinel (NaN loss detection via
-    heartbeat anomaly field).  The Doctor should skip them to avoid interfering.
-    """
+    """True for NaN / divergence failures — Sentinel owns these."""
     lower = stderr.lower()
     return any(re.search(p, lower) for p in _DIVERGENCE_PATTERNS)
+
+
+def is_environment_error(stderr: str) -> bool:
+    """True only when stderr looks like a missing dependency / env setup issue."""
+    if not stderr.strip():
+        return False
+    if is_training_divergence(stderr):
+        return False
+    if _known_fix(stderr):
+        return True
+    return any(re.search(p, stderr, re.IGNORECASE) for p in _ENV_PATTERNS)
 
 
 # ── Known error patterns → fix commands (no LLM needed) ───────────────────────
@@ -155,14 +191,16 @@ def _llm_fix(stderr: str, already_tried: set[str]) -> tuple[list[str], str]:
             + "\n"
         )
 
-    prompt = f"""You are an auto-fix agent for a Python RL training system running on macOS/Linux.
-A training subprocess failed. Here is the end of its stderr output:
+    prompt = f"""You are an environment-setup auto-fix agent for a Python RL training system.
+A training subprocess failed due to a MISSING DEPENDENCY or ENVIRONMENT SETUP issue.
+Here is the end of its stderr output:
 
 {stderr[-3000:]}
 {tried_block}
-Diagnose the error and return ONLY the shell command(s) that will fix it.
-Only return install / setup commands (pip install, conda install, apt-get, etc.).
-Never suggest modifying source code. Prefer the active venv's pip: {_PIP}
+Diagnose the environment/setup error and return ONLY shell commands that install or configure
+dependencies (pip install, apt-get, etc.). Never suggest code changes or hyperparameter tweaks.
+Never suggest fixes for NaN loss, training divergence, or reward issues — those are handled elsewhere.
+Prefer the active venv's pip: {_PIP}
 
 Return ONLY valid JSON:
 {{"commands": ["{_PIP} ...", "..."], "reasoning": "one-line explanation"}}"""
@@ -222,18 +260,19 @@ def _append_log(
     stderr: str,
     attempt: int = 1,
 ) -> None:
-    """Append a doctor entry to sentinel_log.json for UI display."""
-    log_path = Path(results_dir) / "sentinel_log.json"
+    """Append a doctor entry to doctor_log.json (kept separate from sentinel_log.json)."""
+    log_path = Path(results_dir) / "doctor_log.json"
     try:
         entries = json.loads(log_path.read_text()) if log_path.exists() else []
     except Exception:
         entries = []
 
-    label = f"attempt_{attempt}" if attempt > 1 else "environment_setup_error"
+    label = "environment_setup_error"
     entries.append({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "agent_id": agent_id,
         "failure_reason": label,
+        "attempt": attempt,
         "failed_hparams": {},
         "llm_suggested_hparams": {"fix_commands": commands},
         "rationale": reasoning,
@@ -278,6 +317,10 @@ def _diagnose_and_fix_impl(
     attempt: int,
 ) -> DoctorResult:
     print(f"[doctor] diagnosing failure for {agent_id} (attempt {attempt})")
+
+    if not is_environment_error(stderr):
+        print(f"[doctor] not an environment error — skipping (Sentinel handles training failures)")
+        return DoctorResult(fixed=False, commands=[], reasoning="not an environment error")
 
     # Fast path: known pattern — filter out already-tried commands
     raw_cmds = _known_fix(stderr)

@@ -12,10 +12,24 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 
 
 def _hf_enabled() -> bool:
     return bool(os.environ.get("HF_TOKEN"))
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:max_len].strip("-") or "model"
+
+
+def _repo_name(model_name: str | None, algo: str, env_id: str, ts: str) -> str:
+    """Build repo slug: user name + timestamp, or algo/env fallback."""
+    if model_name and model_name.strip():
+        return f"autorl-{_slugify(model_name.strip())}-{ts}"
+    env_slug = _slugify(env_id)
+    return f"autorl-{algo.lower()}-{env_slug}-{ts}"
 
 
 def push_model_to_hub(
@@ -26,10 +40,12 @@ def push_model_to_hub(
     mean_return: float,
     std_return: float = 0.0,
     steps_trained: int = 0,
+    model_name: str | None = None,
+    pushed_at: str | None = None,
 ) -> tuple[str, str]:
     """Upload the winning model checkpoint to HuggingFace Hub.
 
-    Creates (or updates) a repo named  ``{username}/autorl-{algo}-{env_slug}``
+    Creates a repo named ``{username}/autorl-{name}-{timestamp}`` (or algo/env fallback)
     and uploads:
       - ``model.zip``   — the SB3 checkpoint
       - ``README.md``   — model card with performance + usage snippet
@@ -52,11 +68,10 @@ def push_model_to_hub(
     api = HfApi(token=token)
 
     username = api.whoami()["name"]
-
-    # Build a clean repo name: autorl-ppo-hopper-v5
-    env_slug = re.sub(r"[^a-z0-9]+", "-", env_id.lower()).strip("-")
-    algo_slug = algo.lower()
-    repo_name = f"autorl-{algo_slug}-{env_slug}"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    display_name = (model_name or "").strip() or f"{algo} on {env_id}"
+    pushed_at = pushed_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    repo_name = _repo_name(model_name, algo, env_id, ts)
     repo_id = f"{username}/{repo_name}"
 
     api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True, private=False)
@@ -76,11 +91,13 @@ def push_model_to_hub(
     # Write and upload model card
     card = _build_model_card(
         repo_id=repo_id,
+        display_name=display_name,
         algo=algo,
         env_id=env_id,
         mean_return=mean_return,
         std_return=std_return,
         steps_trained=steps_trained,
+        pushed_at=pushed_at,
         code_snippet=code_snippet,
     )
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as fh:
@@ -136,11 +153,13 @@ print("✓ Saved rollout.mp4")\
 
 def _build_model_card(
     repo_id: str,
+    display_name: str,
     algo: str,
     env_id: str,
     mean_return: float,
     std_return: float,
     steps_trained: int,
+    pushed_at: str,
     code_snippet: str,
 ) -> str:
     return f"""\
@@ -153,7 +172,7 @@ tags:
   - {env_id.lower().replace("/", "-")}
 ---
 
-# AutoRL — {algo} on {env_id}
+# {display_name}
 
 Trained automatically by **[AutoRL](https://github.com/wandb/autorl)** — a
 multi-agent RL training race powered by W&B, Weave, and OpenAI.
@@ -166,6 +185,8 @@ multi-agent RL training race powered by W&B, Weave, and OpenAI.
 | Steps Trained | {steps_trained:,} |
 | Algorithm | {algo} |
 | Environment | {env_id} |
+| Pushed At | {pushed_at} |
+| Repo | `{repo_id}` |
 
 ## Usage
 

@@ -346,10 +346,11 @@ function formatLiveReward(reward: number, family: EnvFamily, env: string): strin
 // ── Live agent card ───────────────────────────────────────────────────────────
 
 function LiveAgentCard({
-  entry, hb, history, sentinelEntries, animState, onInfer, inferring,
+  entry, hb, history, sentinelEntries, doctorEntries, animState, onInfer, inferring,
 }: {
   entry: SpawnEntry; hb?: Heartbeat; history: HistPt[];
-  sentinelEntries: SentinelEntry[]; animState: AnimState;
+  sentinelEntries: SentinelEntry[]; doctorEntries: SentinelEntry[];
+  animState: AnimState;
   onInfer: () => void; inferring: boolean; hasVideo: boolean;
 }) {
   const st = as(entry.algo);
@@ -362,6 +363,7 @@ function LiveAgentCard({
   const pct         = hb ? Math.min(100, (hb.steps_completed / maxSteps) * 100) : 0;
   const currentSeg  = history.length > 0 ? history[history.length - 1].seg : 0;
   const latestIntervention = sentinelEntries.at(-1);
+  const latestDoctor = doctorEntries.at(-1);
   const isGrpo = entry.algo === "GRPO";
 
   const statusDot =
@@ -406,18 +408,18 @@ function LiveAgentCard({
         <span className={`${fmeta.color} text-xs`}>{fmeta.icon} {fmeta.label}</span>
       </div>
 
-      {/* doctor intervention */}
-      {latestIntervention && latestIntervention.failure_reason === "environment_setup_error" && (
+      {/* env-doctor intervention (setup errors only) */}
+      {latestDoctor && (
         <div className="px-3 py-2 border-b border-[#2a2a2a] bg-[#0d1a1a]">
           <p className="text-cyan-400 mb-1 text-xs">
-            env-doctor {latestIntervention.outcome === "fixed_retrying" ? "fixed" : "failed"}
+            env-doctor {latestDoctor.outcome === "fixed_retrying" ? "fixed" : "failed"}
           </p>
-          {(latestIntervention.llm_suggested_hparams?.fix_commands as string[] | undefined)?.map((c, i) => (
+          {(latestDoctor.llm_suggested_hparams?.fix_commands as string[] | undefined)?.map((c, i) => (
             <p key={i} className="text-gray-400 text-xs">$ {c}</p>
           ))}
         </div>
       )}
-      {latestIntervention && currentSeg > 0 && latestIntervention.failure_reason !== "environment_setup_error" && (
+      {latestIntervention && currentSeg > 0 && (
         <div className="px-3 py-2 border-b border-[#2a2a2a] bg-[#1a1500]">
           <p className="text-yellow-500 mb-0.5 text-xs">sentinel restart #{currentSeg}</p>
           <p className="text-gray-400 text-xs">
@@ -778,6 +780,7 @@ export default function HomePage() {
   const [runDir,     setRunDir]     = useState("");
   const [heartbeats, setHeartbeats] = useState<Heartbeat[]>([]);
   const [sentinel,   setSentinel]   = useState<SentinelEntry[]>([]);
+  const [doctorLog,  setDoctorLog]  = useState<SentinelEntry[]>([]);
   const [results,    setResults]    = useState<EvalResult[]>([]);
   const [best,       setBest]       = useState<EvalResult | null>(null);
   const [errorMsg,   setErrorMsg]   = useState("");
@@ -791,6 +794,8 @@ export default function HomePage() {
   const [wandbArtifacts, setWandbArtifacts] = useState<Record<string, string>>({});
   const [hfRepoUrl,   setHfRepoUrl]   = useState("");
   const [hfSnippet,   setHfSnippet]   = useState("");
+  const [hfModelName, setHfModelName] = useState("");
+  const [hfPushedAt,  setHfPushedAt]  = useState("");
   const [snippetCopied, setSnippetCopied] = useState(false);
 
   const prevSentinelCount = useRef<Record<string, number>>({});
@@ -799,13 +804,16 @@ export default function HomePage() {
   const textareaRef       = useRef<HTMLTextAreaElement>(null);
 
   const handleStatusData = useCallback((data: {
-    status?: string; heartbeats?: Heartbeat[]; sentinel_log?: SentinelEntry[]; plan?: SpawnEntry[];
+    status?: string; heartbeats?: Heartbeat[]; sentinel_log?: SentinelEntry[];
+    doctor_log?: SentinelEntry[]; plan?: SpawnEntry[];
   }, name: string) => {
     const hbs: Heartbeat[]        = data.heartbeats   ?? [];
     const slog: SentinelEntry[]   = data.sentinel_log ?? [];
+    const dlog: SentinelEntry[]   = data.doctor_log   ?? [];
     const serverPlan: SpawnEntry[] = data.plan        ?? [];
-    setHeartbeats(hbs); setSentinel(slog);
-    setPlan(prev => serverPlan.length > prev.length ? serverPlan : prev);
+    setHeartbeats(hbs); setSentinel(slog); setDoctorLog(dlog);
+    // Keep the launched lineup — don't re-add agents the user removed before launch
+    setPlan(prev => (prev.length > 0 ? prev : (serverPlan.length > 0 ? serverPlan : prev)));
 
     const sentByAgent: Record<string, number> = {};
     for (const e of slog) sentByAgent[e.agent_id] = (sentByAgent[e.agent_id] ?? 0) + 1;
@@ -842,8 +850,12 @@ export default function HomePage() {
         .then(rData => {
           if (rData) {
             setResults(rData.results ?? []); setBest(rData.best ?? null);
+            setSentinel(rData.sentinel_log ?? []);
+            setDoctorLog(rData.doctor_log ?? []);
             if (rData.hf_repo_url) setHfRepoUrl(rData.hf_repo_url);
             if (rData.hf_code_snippet) setHfSnippet(rData.hf_code_snippet);
+            if (rData.hf_model_name) setHfModelName(rData.hf_model_name);
+            if (rData.hf_pushed_at) setHfPushedAt(rData.hf_pushed_at);
           }
           setPhase("done");
         })
@@ -904,8 +916,8 @@ export default function HomePage() {
 
   useEffect(() => {
     if (phase === "racing" && runName && runDir && plan.length > 0)
-      localStorage.setItem("autorl_active_run", JSON.stringify({ runName, runDir, task, plan }));
-  }, [phase, runName, runDir, task, plan]);
+      localStorage.setItem("autorl_active_run", JSON.stringify({ runName, runDir, task, plan, hfModelName }));
+  }, [phase, runName, runDir, task, plan, hfModelName]);
 
   useEffect(() => {
     if (phase === "done" || phase === "idle") localStorage.removeItem("autorl_active_run");
@@ -921,9 +933,10 @@ export default function HomePage() {
     const saved = localStorage.getItem("autorl_active_run");
     if (!saved) return;
     try {
-      const { runName: sn, runDir: sd, task: st, plan: sp } = JSON.parse(saved);
+      const { runName: sn, runDir: sd, task: st, plan: sp, hfModelName: hn } = JSON.parse(saved);
       if (sn && sd && sp?.length) {
         setRunName(sn); setRunDir(sd); setTask(st ?? ""); setPlan(sp);
+        if (hn) setHfModelName(hn);
         setPhase("racing"); startLive(sn);
       }
     } catch { localStorage.removeItem("autorl_active_run"); }
@@ -951,7 +964,7 @@ export default function HomePage() {
     try {
       const res = await fetch(`${BACKEND}/api/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task, run_dir: runDir, plan }),
+        body: JSON.stringify({ task, run_dir: runDir, plan, hf_model_name: hfModelName.trim() || null }),
       });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       setPhase("racing"); startLive(runName);
@@ -993,10 +1006,10 @@ export default function HomePage() {
     if (runName) fetch(`${BACKEND}/api/cancel/${runName}`, { method: "POST" }).catch(() => {});
     localStorage.removeItem("autorl_active_run");
     setPhase("idle"); setTask(""); setPlan([]); setRunName(""); setRunDir("");
-    setHeartbeats([]); setSentinel([]); setResults([]); setBest(null); setErrorMsg("");
+    setHeartbeats([]); setSentinel([]); setDoctorLog([]); setResults([]); setBest(null); setErrorMsg("");
     setHistory({}); setAnimStates({}); setInferring({}); setVideos({}); setVideoModal(null);
     setGrpoInfer({}); setWandbArtifacts({});
-    setHfRepoUrl(""); setHfSnippet(""); setSnippetCopied(false);
+    setHfRepoUrl(""); setHfSnippet(""); setHfModelName(""); setHfPushedAt(""); setSnippetCopied(false);
     prevSentinelCount.current = {};
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
@@ -1005,6 +1018,9 @@ export default function HomePage() {
 
   const hbById = Object.fromEntries(heartbeats.map(h => [h.agent_id, h]));
   const sentByAgent = sentinel.reduce<Record<string, SentinelEntry[]>>((acc, e) => {
+    acc[e.agent_id] = [...(acc[e.agent_id] ?? []), e]; return acc;
+  }, {});
+  const doctorByAgent = doctorLog.reduce<Record<string, SentinelEntry[]>>((acc, e) => {
     acc[e.agent_id] = [...(acc[e.agent_id] ?? []), e]; return acc;
   }, {});
 
@@ -1105,6 +1121,27 @@ export default function HomePage() {
           {plan.length === 0 && (
             <p className="text-gray-600 text-sm text-center py-4">all agents removed</p>
           )}
+
+          <div className="border border-[#2a2a2a] bg-[#111] px-4 py-3 space-y-2">
+            <label className="text-xs text-gray-500 uppercase tracking-widest">
+              huggingface model name (optional)
+            </label>
+            <input
+              value={hfModelName}
+              onChange={e => setHfModelName(e.target.value)}
+              placeholder="e.g. my-pong-champion"
+              className="w-full bg-[#0a0a0a] border border-[#333] text-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-amber-700"
+            />
+            <p className="text-xs text-gray-600">
+              repo will be named{" "}
+              <span className="font-mono text-gray-400">
+                autorl-{hfModelName.trim()
+                  ? hfModelName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "model"
+                  : "algo-env"}-YYYYMMDD-HHMMSS
+              </span>
+            </p>
+          </div>
+
           <div className="flex gap-2 pt-1">
             <button onClick={handleReset}
               className="flex-1 border border-[#333] hover:border-gray-500 text-gray-500 hover:text-gray-300 py-3 text-base transition-colors">
@@ -1150,12 +1187,19 @@ export default function HomePage() {
               {plan.map(e => (
                 <LiveAgentCard key={e.id} entry={e} hb={hbById[e.id]}
                   history={history[e.id] ?? []} sentinelEntries={sentByAgent[e.id] ?? []}
+                  doctorEntries={doctorByAgent[e.id] ?? []}
                   animState={animStates[e.id] ?? "idle"}
                   onInfer={() => handleInfer(e.id)} inferring={!!inferring[e.id]} hasVideo={!!videos[e.id]} />
               ))}
+              {doctorLog.length > 0 && (
+                <div className="space-y-2 pt-2">
+                  <Divider label="env-doctor" />
+                  {doctorLog.map((e, i) => <SentinelBanner key={i} entry={e} />)}
+                </div>
+              )}
               {sentinel.length > 0 && (
                 <div className="space-y-2 pt-2">
-                  <Divider label="interventions" />
+                  <Divider label="sentinel" />
                   {sentinel.map((e, i) => <SentinelBanner key={i} entry={e} />)}
                 </div>
               )}
@@ -1213,12 +1257,21 @@ export default function HomePage() {
                   )}
 
                   {hfRepoUrl && (
-                    <div className="px-4 py-3 border-b border-[#1a1a1a] flex items-center justify-between">
-                      <span className="text-gray-400 truncate">{hfRepoUrl}</span>
-                      <a href={hfRepoUrl} target="_blank" rel="noopener noreferrer"
-                        className="ml-3 shrink-0 border border-[#333] hover:border-amber-600 text-gray-500 hover:text-amber-400 px-2.5 py-1 transition-colors">
-                        view ↗
-                      </a>
+                    <div className="px-4 py-3 border-b border-[#1a1a1a] space-y-1">
+                      {(hfModelName || hfPushedAt) && (
+                        <p className="text-xs text-gray-600">
+                          {hfModelName && <>name: <span className="text-gray-300">{hfModelName}</span></>}
+                          {hfModelName && hfPushedAt && " · "}
+                          {hfPushedAt && <>pushed {hfPushedAt}</>}
+                        </p>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <span className="text-gray-400 truncate">{hfRepoUrl}</span>
+                        <a href={hfRepoUrl} target="_blank" rel="noopener noreferrer"
+                          className="ml-3 shrink-0 border border-[#333] hover:border-amber-600 text-gray-500 hover:text-amber-400 px-2.5 py-1 transition-colors">
+                          view ↗
+                        </a>
+                      </div>
                     </div>
                   )}
 
@@ -1263,10 +1316,17 @@ export default function HomePage() {
               {plan.map(e => (
                 <LiveAgentCard key={e.id} entry={e} hb={hbById[e.id]}
                   history={history[e.id] ?? []} sentinelEntries={sentByAgent[e.id] ?? []}
+                  doctorEntries={doctorByAgent[e.id] ?? []}
                   animState="idle" onInfer={() => handleInfer(e.id)}
                   inferring={!!inferring[e.id]} hasVideo={!!videos[e.id]} />
               ))}
 
+              {doctorLog.length > 0 && (
+                <div className="space-y-2 pt-2">
+                  <Divider label="env-doctor log" />
+                  {doctorLog.map((e, i) => <SentinelBanner key={i} entry={e} />)}
+                </div>
+              )}
               {sentinel.length > 0 && (
                 <div className="space-y-2 pt-2">
                   <Divider label="sentinel log" />
