@@ -6,7 +6,7 @@ Manages the lifecycle of individual training agent processes:
   - restart_training_agent  kill then re-launch with new hparams
 
 Local algo scripts live in training/train_{algo}.py.
-Remote (RunPod) execution is handled via runpod_client.
+Remote (RunPod) execution is handled via pod_manager.
 """
 
 from __future__ import annotations
@@ -78,11 +78,11 @@ def _write_failed(entry: SpawnPlanEntry, results_dir: str) -> None:
 
 async def _ensure_pod() -> str:
     async with _POD_LOCK:
-        from runpod_client import pod_manager as pm
+        from pod_manager import pod_manager as pm
 
         if not os.environ.get("RUNPOD_API_KEY"):
             raise RuntimeError("RUNPOD_API_KEY not set")
-        pod_id = os.environ.get("RUNPOD_POD_ID") or pm.POD_ID
+        pod_id = os.environ.get("RUNPOD_POD_ID")
         if pod_id:
             return pod_id
         pod_id = await asyncio.to_thread(pm.create_training_pod)
@@ -95,7 +95,7 @@ async def _ensure_pod() -> str:
 
 
 def _grpo_remote_cmd(entry: SpawnPlanEntry, remote_results: str, hp: dict) -> str:
-    from runpod_client.pod_manager import VENV_PYTHON
+    from pod_manager.pod_manager import VENV_PYTHON
 
     return (
         f"{VENV_PYTHON} /workspace/training/train_grpo_countdown.py "
@@ -110,7 +110,7 @@ def _grpo_remote_cmd(entry: SpawnPlanEntry, remote_results: str, hp: dict) -> st
 
 
 async def _run_runpod(entry: SpawnPlanEntry, results_dir: str, hp: dict | None = None) -> int:
-    from runpod_client.pod_manager import scp_from_pod, ssh_exec
+    from pod_manager.pod_manager import scp_from_pod, ssh_exec
 
     pod_id = await _ensure_pod()
     h = {**entry.hparams, **(hp or {})}

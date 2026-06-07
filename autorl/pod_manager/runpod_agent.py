@@ -41,7 +41,7 @@ from pod_manager.pod_manager import (
     verify_dependencies,
     wait_for_pod,
 )
-from orchestrator.schemas import SpawnPlanEntry
+from orchestrator.orchestrator_agent import SpawnPlanEntry
 
 REMOTE_WORKSPACE = "/workspace"
 REMOTE_RESULTS = f"{REMOTE_WORKSPACE}/results"

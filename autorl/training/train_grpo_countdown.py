@@ -128,7 +128,7 @@ class NudgeCallback(TrainerCallback):
         return control
 
 
-def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir):
+def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir, device="auto"):
     """Time-budgeted GRPO training on Countdown. Traced as a Weave op."""
     os.makedirs(f"{results_dir}/{agent_id}", exist_ok=True)
 
