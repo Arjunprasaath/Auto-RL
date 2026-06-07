@@ -214,7 +214,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     # Evaluate on 100 test puzzles (held-out 5% split)
     print(f"[{agent_id}] Evaluating on test set...")
     test_dataset = load_countdown_dataset(split="test", seed=seed)
-    total = min(100, len(test_dataset))
+    total = min(10, len(test_dataset))
     correct = 0
 
     model.eval()

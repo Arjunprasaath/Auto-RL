@@ -16,7 +16,7 @@ load_dotenv(os.path.join(_PKG_ROOT, ".env"))
 
 import weave
 
-from orchestrator.device import resolve_grpo_device, resolve_sb3_device
+from orchestrator.device import resolve_sb3_device
 from agents.sentinel import run_sentinel
 from agents.training_agent import run_training_agent
 from orchestrator.orchestrator_agent import EvalResult, RUNS_DIR, SpawnPlanEntry
@@ -59,10 +59,7 @@ async def run_swarm(plan: list[SpawnPlanEntry], results_dir: str) -> list[EvalRe
 async def _main(run_dir: str) -> list[EvalResult]:
     plan = load_spawn_plan(run_dir)
     sb3 = resolve_sb3_device()
-    grpo = resolve_grpo_device()
-    print(f"[swarm] sb3={sb3} grpo={grpo} — launching {len(plan)} agents in {run_dir}")
-    if grpo == "mps":
-        print("[swarm] MuJoCo agents use CPU (SB3 MLP); GRPO uses Apple GPU (MPS)")
+    print(f"[swarm] sb3={sb3} — launching {len(plan)} agents in {run_dir}")
     results = await run_swarm(plan, run_dir)
     print(f"[swarm] collected {len(results)}/{len(plan)} eval results")
     return results

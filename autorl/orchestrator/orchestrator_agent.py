@@ -79,16 +79,12 @@ def create_run_dir(run_id: str | None = None, base: str = RUNS_DIR) -> str:
 
 
 def _countdown_exec() -> str:
-    return "local" if is_mps() else "runpod"
+    return "runpod"
 
 
 def _build_instructions() -> str:
     countdown_exec = _countdown_exec()
-    device_note = (
-        "Apple Silicon MPS is available — Countdown GRPO runs locally on MPS (exec=local)."
-        if countdown_exec == "local"
-        else "Countdown GRPO requires a cloud GPU (exec=runpod)."
-    )
+    device_note = "Countdown GRPO always runs on a cloud GPU (exec=runpod)."
     return f"""You are the AutoRL Orchestrator. Read the user's task and return a spawn plan:
 a list of training agents to run in parallel. Each agent must explore a DIFFERENT config —
 never spawn N copies of the same algo/env/hparams. Your goal is to spawn agents with DIVERSE
@@ -185,8 +181,9 @@ You may use ANY valid Gymnasium environment id. Common ones grouped by type:
    If the user names a specific env (e.g. "CartPole", "Ant"), use it exactly.
 3. Vary algo, env, lr, n_steps, and ent_coef across agents so the race is informative.
 4. Every agent with the same algo MUST have a different seed.
-5. Include EXACTLY ONE agent anywhere in the plan with hparams.lr = 1.0 (Sentinel fault-tolerance demo).
+5. Include EXACTLY ONE SB3 agent (PPO, SAC, or A2C — never GRPO) with hparams.lr = 1.0 (Sentinel fault-tolerance demo).
    All other agents must use sensible learning rates (never 1.0 except that one agent).
+   NEVER set lr=1.0 on a GRPO agent — LLM fine-tuning is expensive and must use valid hyperparameters.
 6. Never use SAC for discrete-action environments.
 """
 
