@@ -99,7 +99,7 @@ def init_wandb(agent_id: str, lr: float, seed: int):
 
 
 @weave.op(name="GRPO_Countdown_Training")
-def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir):
+def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir, device="auto"):
     """Time-budgeted GRPO training on Countdown. Traced as a Weave op."""
     os.makedirs(f"{results_dir}/{agent_id}", exist_ok=True)
 
@@ -108,11 +108,18 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     hb = HeartbeatWriter(agent_id, results_dir)
     hb.start()
 
-    print(f"[{agent_id}] Loading model {MODEL_NAME}...")
+    print(f"[{agent_id}] Loading model {MODEL_NAME} on {device}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, torch_dtype="auto", device_map="auto"
-    )
+    if device == "mps":
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, torch_dtype=torch.float16,
+        ).to("mps")
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, torch_dtype="auto", device_map="auto" if device == "auto" else None,
+        )
+        if device not in ("auto", "cpu"):
+            model = model.to(device)
 
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -139,7 +146,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
 
     grpo_config = GRPOConfig(
         learning_rate=lr,
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=2 if device == "mps" else 4,
         num_generations=num_generations,
         max_completion_length=256,
         temperature=temperature,
@@ -245,6 +252,7 @@ def main():
     parser.add_argument("--num-generations", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--results-dir", default="/workspace/results")
+    parser.add_argument("--device", default=os.environ.get("AUTORL_GRPO_DEVICE", "auto"))
     args = parser.parse_args()
 
     init_weave(args.agent_id)
@@ -256,6 +264,7 @@ def main():
         num_generations=args.num_generations,
         temperature=args.temperature,
         results_dir=args.results_dir,
+        device=args.device,
     )
 
 

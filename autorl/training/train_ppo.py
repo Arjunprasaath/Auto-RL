@@ -34,6 +34,7 @@ def main():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--results-dir", default="./results")
+    p.add_argument("--device", default=os.environ.get("AUTORL_SB3_DEVICE", "cpu"))
     a = p.parse_args()
 
     os.makedirs(f"{a.results_dir}/{a.agent_id}", exist_ok=True)
@@ -42,20 +43,27 @@ def main():
     run, tb_log, wandb_cb = start_wandb_run(a.agent_id, ALGO, a.env_id, a.lr, a.seed, a.results_dir)
 
     model = PPO("MlpPolicy", a.env_id, learning_rate=a.lr, seed=a.seed, verbose=0,
-                tensorboard_log=tb_log)
+                tensorboard_log=tb_log, device=a.device)
     cb = WeaveLogCallback(a.agent_id)
     callback = CallbackList([cb, wandb_cb]) if wandb_cb else cb
 
     start = time.time()
     steps = 0
-    while time.time() - start < a.time_budget:
-        model.learn(CHUNK, callback=callback, reset_num_timesteps=False, tb_log_name=ALGO)
-        steps += CHUNK
-        hb.update(steps, cb.ep_returns[-1] if cb.ep_returns else 0.0)
-        nudge = hb.check_nudge()
-        if nudge:
-            model.policy.optimizer.param_groups[0]["lr"] = nudge.get("lr", a.lr)
-            print(f"[{a.agent_id}] nudged lr={nudge.get('lr')}")
+    try:
+        while time.time() - start < a.time_budget:
+            model.learn(CHUNK, callback=callback, reset_num_timesteps=False, tb_log_name=ALGO)
+            steps += CHUNK
+            hb.update(steps, cb.ep_returns[-1] if cb.ep_returns else 0.0)
+            nudge = hb.check_nudge()
+            if nudge:
+                model.policy.optimizer.param_groups[0]["lr"] = nudge.get("lr", a.lr)
+                print(f"[{a.agent_id}] nudged lr={nudge.get('lr')}")
+    except Exception as exc:
+        print(f"[{a.agent_id}] training error: {exc}")
+        hb.update(steps, cb.ep_returns[-1] if cb.ep_returns else 0.0, loss=float("nan"))
+        hb.stop("failed")
+        finish_wandb_run(run)
+        sys.exit(1)
 
     mean_r, std_r = evaluate_policy(model, model.get_env(), n_eval_episodes=20)
     ckpt = f"{a.results_dir}/{a.agent_id}/model.zip"

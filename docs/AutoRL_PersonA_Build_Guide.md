@@ -367,69 +367,78 @@ async def run_training_agent(entry: SpawnPlanEntry):
 
 ## Phase 3 — Hours 8–14: Sentinel & CopilotKit Scaffold
 
-### 3.1 `agents/sentinel.py` — Doom Loop Sentinel
+### 3.1 `agents/sentinel.py` — Doom Loop Sentinel (LLM-based)
+
+> **Implementation status: COMPLETE.** The sentinel is fully implemented as an LLM-based agent in `agents/sentinel.py`. `agents/training_agent.py` lives alongside it. `orchestrator/swarm_runner.py` imports both from `agents.*`.
+
+**Detection** is rule-based (fast, reliable): read `heartbeat.json` every 30 s.
+**Intervention** is LLM-driven: GPT receives the failed agent's config, the failure reason, and the full history of prior interventions on this run, then suggests a new hyperparameter configuration. The sentinel kills the agent and relaunches it with the LLM-suggested config.
+**Memory**: every intervention is appended to `sentinel_log.json` in the run directory so the history of "what was tried and what happened" persists after the run.
 
 ```python
-import asyncio, json, weave, os
-from datetime import datetime, timezone
-from orchestrator.schemas import Heartbeat
+# agents/sentinel.py — key structure (simplified)
+from agents import Agent, AgentOutputSchema, Runner  # openai-agents SDK
+from pydantic import BaseModel
+
+class SentinelHparams(BaseModel):
+    lr: float
+    seed: int
+    n_steps: int | None = None
+    ent_coef: float | None = None
+    gamma: float | None = None
+
+_sentinel_agent = Agent(
+    name="DoomLoopSentinelLLM",
+    instructions=SENTINEL_SYSTEM_PROMPT,   # rules: never lr>=0.1, never repeat failed lr, etc.
+    model=OPENAI_MODEL,
+    output_type=AgentOutputSchema(SentinelHparams, strict_json_schema=False),
+)
+
+@weave.op(name="SentinelLLM")
+async def _llm_suggest_hparams(entry_dict, failure_reason, prior_interventions) -> dict:
+    prompt = f"Agent failed: {failure_reason}\nOriginal config: {entry_dict}\nPrior interventions: {prior_interventions}"
+    result = await Runner.run(_sentinel_agent, prompt)
+    return result.final_output.model_dump(exclude_none=True)
 
 @weave.op(name="DoomLoopSentinel")
-async def run_sentinel(
-    agent_ids: list[str],
-    results_dir: str = "./results",
-    check_interval: int = 30,
-    nudge_threshold_s: int = 120,
-    kill_threshold_s: int = 240,
-    stop_event: asyncio.Event = None,
-):
-    nudged = {}       # agent_id -> timestamp of nudge
-    restarted = set() # agent_ids that have been restarted once
-    killed = set()    # agent_ids permanently killed
-
+async def run_sentinel(agent_ids, results_dir, stop_event):
+    # Detection loop — rule-based, every 30 s
     while not stop_event.is_set():
         for agent_id in agent_ids:
-            if agent_id in killed:
-                continue
-
-            hb_path = f"{results_dir}/{agent_id}/heartbeat.json"
-            if not os.path.exists(hb_path):
-                continue
-
-            with open(hb_path) as f:
-                hb = Heartbeat(**json.load(f))
-
-            now = datetime.now(timezone.utc)
-            age_s = (now - hb.timestamp).total_seconds()
-
-            # NaN: skip nudge, immediate kill+restart
-            if hb.anomaly == "nan_loss":
-                if agent_id not in restarted:
-                    await _kill_and_restart(agent_id, "nan_loss")
-                    restarted.add(agent_id)
-                else:
-                    await _kill_permanently(agent_id)
-                    killed.add(agent_id)
-                continue
-
-            if age_s > nudge_threshold_s and agent_id not in nudged:
-                await _nudge(agent_id, results_dir)
-                nudged[agent_id] = now
-
-            elif age_s > kill_threshold_s and agent_id in nudged:
-                if agent_id not in restarted:
-                    await _kill_and_restart(agent_id, "stale_after_nudge")
-                    restarted.add(agent_id)
-                else:
-                    await _kill_permanently(agent_id)
-                    killed.add(agent_id)
-
-        await asyncio.sleep(check_interval)
+            hb = read_heartbeat(...)
+            if hb["anomaly"] == "nan_loss":
+                new_hparams = await _llm_suggest_hparams(entry, "nan_loss", prior_log)
+                log_intervention(...)       # writes to sentinel_log.json
+                await kill_training_agent(agent_id)
+                asyncio.create_task(run_training_agent(entry, hparams_override=new_hparams))
+            elif age_s > 120 and not nudged:
+                new_hparams = await _llm_suggest_hparams(entry, "stale_heartbeat_nudge", prior_log)
+                write_nudge(agent_id, new_hparams)  # agent picks this up via hb.check_nudge()
+            elif age_s > 240 and nudged and not restarted:
+                new_hparams = await _llm_suggest_hparams(entry, "stale_after_nudge", prior_log)
+                await kill_and_restart(entry, new_hparams)
+        await asyncio.sleep(30)
+    await _check_all()  # final sweep before shutdown
 ```
 
-**Nudge implementation:** Write `results/{agent_id}/nudge.json` with `{"lr": current_lr / 2, "seed": new_seed}`. Person B's `HeartbeatWriter.check_nudge()` picks this up on every 60s tick, applies the new hparams, and deletes the file. Your PPO/SAC scripts do the same via `hb.check_nudge()`.
+**`agents/__init__.py` — SDK bootstrap:** Because the local `agents/` directory shadows the installed `openai-agents` SDK (which also uses the module name `agents`), the `__init__.py` contains a bootstrap that temporarily registers the SDK as `agents` in `sys.modules` while it executes its own init, then restores this package. This makes `from agents import Agent, AgentOutputSchema, Runner` work project-wide.
 
-**Kill + restart:** Put the agent PID in a shared dict. Call `process.terminate()`. Request the swarm runner (via `asyncio.Queue`) to spawn a replacement with `lr=3e-4` and a new seed.
+**Nudge implementation:** Write `results/{agent_id}/nudge.json` with the LLM-suggested hparams dict. The training script picks this up via `hb.check_nudge()` on every 60 s tick, applies the new hparams, and deletes the file.
+
+**Kill + restart:** `agents/training_agent.kill_training_agent(agent_id)` — SIGTERM → SIGKILL the subprocess via the `PROCESSES` dict. Then `run_training_agent(entry, hparams_override=new_hparams)` relaunches it. The outcome (completed / failed_again) is written back into `sentinel_log.json` when the restarted agent finishes.
+
+**`sentinel_log.json` example entry:**
+```json
+{
+  "timestamp": "2026-06-07T00:44:28Z",
+  "agent_id": "agent_4",
+  "failure_reason": "nan_loss",
+  "failed_hparams": {"lr": 1.0, "seed": 42},
+  "heartbeat_at_failure": {"steps_completed": 70000, "anomaly": "nan_loss"},
+  "llm_suggested_hparams": {"lr": 0.0003, "seed": 1337, "n_steps": 2048, "ent_coef": 0.01},
+  "outcome": "completed"
+}
+```
 
 ### 3.2 CopilotKit Next.js App
 

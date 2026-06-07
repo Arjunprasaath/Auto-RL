@@ -13,8 +13,17 @@ anthropic
 pydantic>=2.0
 fastapi
 uvicorn[standard]
-copilotkit
+copilotkit          # CopilotKit Python SDK — used by ui/agent/middleware.py
 python-dotenv
+
+# --- UI: Next.js frontend (Node.js ≥20 required) ---
+# The UI lives in autorl/ui/ and is a separate npm project.
+# Python deps above power the FastAPI backend at ui/agent/middleware.py.
+# To install the JS side:
+#   cd ui && npm install
+# To run:
+#   Terminal 1: bash ui/agent/start.sh          # FastAPI backend  → :8000
+#   Terminal 2: cd ui && npm run dev            # Next.js frontend → :3000
 
 # --- Local RL training (MuJoCo: PPO / SAC / A2C on Mac) ---
 # Versions below are verified working on macOS arm64 + Python 3.12.
@@ -28,14 +37,15 @@ imageio[ffmpeg]>=2.37.0
 imageio-ffmpeg>=0.6.0
 torch>=2.7.0
 
-# --- GRPO / Countdown training (RunPod GPU only; not needed for local race) ---
-# Install these on the RunPod pod, not on the Mac. Uncomment if running locally.
-# trl
-# transformers
-# peft
-# datasets
-# accelerate
-# bitsandbytes
+# --- GRPO / Countdown training (local MPS on Mac, or RunPod GPU) ---
+trl
+transformers
+peft
+datasets
+accelerate
+
+# --- RunPod API (local orchestrator only; GRPO deps install on the pod) ---
+runpod
 
 # --- Dev / tooling ---
 pytest

@@ -12,7 +12,7 @@
 
 AutoRL is a multi-agent system where a user describes an RL task in natural language through a CopilotKit UI, and an Orchestrator agent autonomously decides the environment, selects competing algorithms, spawns N independent Training Agents that each start, monitor, and complete a training run, then hands results to an Evaluator agent that picks the best-performing model — which is shown **in action live in the UI** (MuJoCo video render or Countdown live solve).
 
-A dedicated **Doom Loop Sentinel** agent monitors all spawned agents in real time. On detecting a stuck agent, it first nudges it with a corrective prompt. If the agent remains stuck, the Sentinel kills and restarts it with a modified configuration. Every agent is traced end-to-end by W&B Weave.
+A dedicated **Doom Loop Sentinel** agent monitors all spawned agents in real time. On detecting a stuck or diverging agent, it calls an LLM (GPT) with the failure context, the agent's original config, and the full history of prior interventions — the LLM suggests a new hyperparameter configuration. The Sentinel kills the failing agent and relaunches it with the LLM-suggested config. Every intervention is logged to `sentinel_log.json` and traced end-to-end by W&B Weave.
 
 > **Why it fits WeaveHacks:** Genuinely autonomous agents that make decisions, monitor progress, and adapt · Doom Loop Sentinel with escalating intervention · live training race visible in CopilotKit UI · Weave traces show the full multi-agent graph
 
@@ -24,7 +24,7 @@ A pipeline is a fixed sequence of function calls. AutoRL is multi-agent because 
 
 - **Orchestrator:** Interprets the user task, decides environment family, selects which algorithms to race, determines N, chooses execution targets — none of this is hard-coded. Different prompts produce genuinely different spawn plans.
 - **Training Agents:** Each agent starts its training job, monitors metrics during the run (checking for divergence, NaN losses, plateau detection), and writes heartbeats so the Sentinel can verify liveness. They are not fire-and-forget scripts.
-- **Doom Loop Sentinel:** A persistent supervisor spawned at the start. It watches all Training Agent heartbeats and Weave traces. On detecting a stuck agent it escalates: nudge → kill + restart → kill only. It makes independent intervention decisions.
+- **Doom Loop Sentinel:** A persistent supervisor spawned at the start. Detection is rule-based (heartbeat staleness, `nan_loss` anomaly). Intervention is LLM-driven: on every failure it calls GPT with the failed config + full intervention history, receives a structured `SentinelHparams` suggestion, kills the agent, and relaunches it with the LLM-suggested config. Every decision is logged to `sentinel_log.json` and traced in Weave.
 - **Evaluator:** Reads all results, reasons about which metrics matter for this task, and produces a justified ranking — not a fixed formula.
 
 ---
@@ -102,13 +102,13 @@ Responsible for one complete training lifecycle: (1) connect to execution target
 | **Exec** | `@weave.op` · local asyncio subprocess (MuJoCo) or RunPod SSH (Countdown) · fixed time budget |
 
 #### Doom Loop Sentinel
-Persistent supervisor spawned at pipeline start. Monitors all Training Agents via heartbeat files and Weave traces. Escalation: nudge → kill + restart → kill only.
+Persistent supervisor spawned at pipeline start. **Detection** is rule-based (reads `heartbeat.json` every 30 s). **Intervention** is LLM-driven: on detecting NaN loss or a stale/frozen agent, it calls GPT with the failure context, the original spawn-plan config, and the full history of prior interventions on this run; GPT suggests a new hyperparameter configuration; the Sentinel kills the agent and relaunches it with the LLM-suggested config. All decisions are appended to `sentinel_log.json` and traced in Weave.
 
 | | |
 |---|---|
-| **In** | All `heartbeat.json` files · Weave trace stream |
-| **Out** | Corrective nudge · kill signal · restart spawn request to Orchestrator |
-| **Exec** | `@weave.op` · persistent · reads heartbeats every 30s |
+| **In** | All `heartbeat.json` files · `spawn_plan.json` · `sentinel_log.json` (prior intervention history) |
+| **Out** | LLM-suggested `nudge.json` · kill signal · restarted agent with LLM config · `sentinel_log.json` |
+| **Exec** | `@weave.op` · `agents/sentinel.py` · persistent · checks every 30 s · one LLM call per intervention |
 
 #### Evaluator
 Spawned after all Training Agents complete or timeout. Groups results by environment family. Uses an LLM call to reason about why the winner won. Pushes to Weave Evaluation with custom scorers.
@@ -180,14 +180,22 @@ Human-agent interface. Chat input, approval card before spawning, live race dash
 
 ### 3.4 Doom Loop Sentinel — Escalation Protocol
 
-| Condition | Action | Effect |
-|---|---|---|
-| Heartbeat stale > 2 min | **NUDGE:** write `nudge.json` with new hparams (halved lr, new seed) | Agent retries with modified params; Sentinel logs to Weave |
-| Still stale > 4 min after nudge | **KILL + RESTART:** terminate process, spawn replacement with modified config | New agent starts fresh; old agent marked `status=restarted` |
-| Replacement also stalls > 4 min | **KILL ONLY:** terminate permanently | Marked `status=failed`; Evaluator works with fewer results |
-| `anomaly: "nan_loss"` in heartbeat | **Immediate KILL + RESTART** (skip nudge) | NaN is unrecoverable; restart with `lr=3e-4` |
+| Condition | Detection | LLM Action | Effect |
+|---|---|---|---|
+| Heartbeat stale > 2 min | age_s > 120 | **LLM NUDGE:** GPT suggests new hparams → write `nudge.json` | Agent retries with LLM-suggested params; logged to `sentinel_log.json` |
+| Still stale > 4 min after nudge | age_s > 240 | **LLM KILL + RESTART:** GPT suggests new config → kill + relaunch | New agent starts with LLM config; outcome logged when it finishes |
+| Replacement also fails | second_failure | **KILL ONLY:** no further LLM call | Marked `killed_permanently` in `sentinel_log.json`; Evaluator works with fewer results |
+| `anomaly: "nan_loss"` in heartbeat | immediate | **LLM KILL + RESTART** (skip nudge) | NaN is unrecoverable; GPT suggests safe lr (1e-4–5e-4) and new seed |
+| NaN on second attempt | second_failure | **KILL ONLY** | Marked `killed_permanently` |
 
-> **Why one Sentinel, not per-agent guards:** A single Sentinel has global view — it can detect 3 of 4 agents stuck (RunPod might be down) and make a systemic decision rather than each guard acting independently.
+**What GPT receives per intervention:**
+- The original `SpawnPlanEntry` (algo, env, hparams)
+- The failure reason (`nan_loss`, `stale_heartbeat_nudge`, `stale_after_nudge`)
+- The full `sentinel_log.json` history of all prior interventions on this run
+
+**What GPT outputs:** a `SentinelHparams` JSON object (`lr`, `seed`, optionally `n_steps`, `ent_coef`, `gamma`) — structured output via `AgentOutputSchema`.
+
+> **Why one Sentinel, not per-agent guards:** A single Sentinel has global view — it can detect 3 of 4 agents stuck (RunPod might be down) and make a systemic decision. It also maintains a shared intervention history so the LLM never repeats a config that already failed.
 
 ---
 
@@ -216,7 +224,7 @@ Human-agent interface. Chat input, approval card before spawning, live race dash
 | Online evals | Training Agents push reward/accuracy every 30s; visible as live charts |
 | `weave.Evaluation` | Evaluator pushes rankings as scored Evaluation with per-env leaderboard |
 | Trace tree | Judges see: Orchestrator → [N parallel Training Agents + Sentinel] → Evaluator |
-| Sentinel interventions | Every nudge/kill/restart is a Weave trace event |
+| Sentinel interventions | Every LLM call (`@weave.op SentinelLLM`) + kill/restart is a Weave trace event; full log in `sentinel_log.json` |
 
 ### 3.7 CopilotKit Integration
 
@@ -375,7 +383,7 @@ Practice until it runs exactly 2.5 min cold. Record video by Hour 32.
 | 0:00 – 0:20 | Open CopilotKit UI. Type: *"Train a fast runner in a physics sim and an LLM that learns to solve arithmetic puzzles."* Orchestrator responds with its plan in chat. |
 | 0:20 – 0:35 | Approval card: *"Spawning 4 agents: 2 local MuJoCo (PPO, SAC), 2 RunPod Countdown (GRPO seed=42, GRPO seed=123 lr=1.0). Est. cost: $0.15. Approve?"* Click Approve. |
 | 0:35 – 1:10 | Race dashboard: 4 agent cards. SAC reward climbing faster than PPO. GRPO seed=42 accuracy ticking up from 51%. GRPO seed=123 (lr=1.0) already showing NaN in heartbeat. |
-| 1:10 – 1:30 | **Sentinel fires:** alert card — *"Agent 4 (GRPO lr=1.0): NaN loss detected. Killing and restarting with lr=3e-4."* Show Weave trace node for the intervention. |
+| 1:10 – 1:30 | **Sentinel fires:** alert card — *"Agent 4 (GRPO lr=1.0): NaN loss detected. Asking LLM for recovery config… restarting with lr=3e-4, seed=1337."* Show the `SentinelLLM` Weave trace node — the LLM's reasoning is visible there. Open `sentinel_log.json` to show the full intervention record. |
 | 1:30 – 1:50 | Training ends. Evaluator runs. Leaderboard: SAC wins on HalfCheetah, GRPO seed=42 wins on Countdown. Show LLM-generated rationale. |
 | 1:50 – 2:10 | **MONEY SHOT:** MuJoCo video plays — trained HalfCheetah running. Switch to Countdown solver — model given `[4, 7, 2, 9] → 24` and works through step-by-step chain of thought. |
 | 2:10 – 2:30 | Open Weave trace tree. Point out the multi-agent graph: Orchestrator → [4 Training Agents + Sentinel] → Evaluator. Show Sentinel intervention node. *"Change the prompt, get a different race."* |
