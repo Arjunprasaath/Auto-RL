@@ -35,9 +35,10 @@ interface EvalResult {
   mean_return: number; std_return: number; checkpoint_path: string;
 }
 interface InferenceCase {
-  numbers: number[]; target: number; prompt: string;
+  numbers: number[]; target: number; prompt?: string;
   model_response: string; success: boolean;
 }
+interface GrpoInferData { results: InferenceCase[]; baseline: InferenceCase[]; }
 interface HistPt { steps: number; reward: number; seg: number; }
 type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error";
 type AnimState = "vanish" | "appear" | "idle";
@@ -596,49 +597,124 @@ function SentinelBanner({ entry }: { entry: SentinelEntry }) {
   }
 
   return (
-    <div className={`border text-sm ${isKilled ? "border-red-900 bg-[#150000]" : "border-yellow-900 bg-[#14100a]"}`}>
-      <div className="px-3 py-2.5 border-b border-[#2a2a2a] flex items-center gap-2">
-        <span className="text-yellow-400">sentinel</span>
-        <span className="text-gray-500">{entry.agent_id}</span>
-        <span className="text-gray-700 ml-auto text-xs">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+    <div className={`flex items-start gap-3 rounded-xl p-3 border text-sm
+      ${isKilled ? "bg-red-950 border-red-700" : "bg-amber-950 border-amber-700"}`}>
+      <span className="text-lg mt-0.5">{isKilled ? "🔴" : "⚠️"}</span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <span className="font-bold text-amber-300 text-xs">Sentinel</span>
+          <span className="font-mono text-xs text-gray-400">{entry.agent_id}</span>
+          <span className="text-xs text-gray-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+        </div>
+        <div className="bg-black/30 rounded-lg p-2 font-mono text-xs space-y-1">
+          {entry.failed_hparams && (
+            <p className="text-red-300">Failed: {Object.entries(entry.failed_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
+          )}
+          {entry.llm_suggested_hparams && Object.keys(entry.llm_suggested_hparams).length > 0 && (
+            <p className="text-green-300">GPT → {Object.entries(entry.llm_suggested_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
+          )}
+        </div>
+        <p className={`text-xs mt-1 font-semibold
+          ${entry.outcome === "completed" ? "text-green-400" : isKilled ? "text-red-400" : "text-yellow-400"}`}>
+          → {entry.outcome}
+        </p>
       </div>
-      <div className="px-3 py-2 space-y-1">
-        <p className="text-red-400">failed lr={String(entry.failed_hparams.lr)}</p>
-        {Object.keys(entry.llm_suggested_hparams).length > 0 && (
-          <p className="text-green-400">→ {Object.entries(entry.llm_suggested_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
-        )}
-      </div>
-      <p className={`px-3 pb-2 ${entry.outcome === "completed" ? "text-green-400" : isKilled ? "text-red-400" : "text-yellow-400"}`}>
-        → {entry.outcome}
-      </p>
     </div>
   );
 }
 
 // ── Inference showcase ─────────────────────────────────────────────────────────
 
-function InferenceShowcase({ cases, agentId, wandbArtifact }: {
-  cases: InferenceCase[]; agentId: string; wandbArtifact?: string;
+function InferenceShowcase({ cases, baseline, agentId, wandbArtifact }: {
+  cases: InferenceCase[]; baseline?: InferenceCase[]; agentId: string; wandbArtifact?: string;
 }) {
   const passed = cases.filter(c => c.success).length;
+  const hasBaseline = baseline && baseline.length > 0;
+
   return (
     <div className="text-sm space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-gray-400">inference · <span className="text-amber-400">{agentId}</span></span>
-        <span className="text-gray-500">{passed}/{cases.length} correct</span>
+        <p className="text-sm font-semibold text-gray-300">
+          {hasBaseline ? "Before / After Training — " : "Inference Showcase — "}
+          <span className="font-mono text-orange-400">{agentId}</span>
+        </p>
+        <span className="text-xs text-gray-500">{passed}/{cases.length} correct after training</span>
       </div>
-      {wandbArtifact && <p className="text-gray-600 text-xs">artifact: <span className="text-violet-400">{wandbArtifact}</span></p>}
-      <div className="space-y-2">
-        {cases.map((c, i) => (
-          <div key={i} className={`border px-3 py-2 ${c.success ? "border-green-900 bg-[#0a150a]" : "border-red-900 bg-[#150a0a]"}`}>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-gray-400">[{c.numbers.join(", ")}] → {c.target}</span>
-              <span className={c.success ? "text-green-400" : "text-red-400"}>{c.success ? "pass" : "fail"}</span>
+      {wandbArtifact && (
+        <p className="text-xs text-gray-500">
+          Model artifact: <span className="font-mono text-violet-400">{wandbArtifact}</span> (W&B)
+        </p>
+      )}
+
+      {hasBaseline ? (
+        <div className="space-y-3">
+          {/* Column headers */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="text-xs font-semibold text-gray-400 text-center py-1 bg-gray-800/50 rounded-lg">
+              Before (base model)
             </div>
-            <p className="text-gray-500 text-xs whitespace-pre-wrap max-h-24 overflow-y-auto">{c.model_response || "(empty)"}</p>
+            <div className="text-xs font-semibold text-orange-400 text-center py-1 bg-orange-950/30 rounded-lg border border-orange-900/40">
+              After (trained)
+            </div>
           </div>
-        ))}
-      </div>
+          {cases.map((c, i) => {
+            const b = baseline[i];
+            return (
+              <div key={i} className="rounded-xl border border-gray-700 bg-gray-900/40 overflow-hidden">
+                {/* Case header */}
+                <div className="flex items-center justify-between px-3 py-2 bg-gray-800/60 border-b border-gray-700">
+                  <span className="text-xs font-mono text-gray-400">
+                    [{c.numbers.join(", ")}] → {c.target}
+                  </span>
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full
+                    ${c.success ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"}`}>
+                    {c.success ? "✅ PASS" : "❌ FAIL"}
+                  </span>
+                </div>
+                {/* Two-column responses */}
+                <div className="grid grid-cols-2 divide-x divide-gray-700">
+                  <div className="p-2">
+                    <div className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-500 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                      {b?.model_response || "(no baseline)"}
+                    </div>
+                  </div>
+                  <div className="p-2">
+                    <div className={`rounded-lg p-2 text-xs font-mono whitespace-pre-wrap max-h-40 overflow-y-auto
+                      ${c.success
+                        ? "bg-emerald-950/40 text-emerald-200"
+                        : "bg-black/30 text-gray-300"}`}>
+                      {c.model_response || "(empty response)"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {cases.map((c, i) => (
+            <div key={i} className={`rounded-xl border p-3 space-y-2
+              ${c.success ? "bg-emerald-950/40 border-emerald-800" : "bg-red-950/40 border-red-800"}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">{c.success ? "✅" : "❌"}</span>
+                  <span className="text-xs font-mono text-gray-400">
+                    [{c.numbers.join(", ")}] → {c.target}
+                  </span>
+                </div>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-full
+                  ${c.success ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"}`}>
+                  {c.success ? "PASS" : "FAIL"}
+                </span>
+              </div>
+              <div className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-300 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                {c.model_response || "(empty response)"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -711,7 +787,7 @@ export default function HomePage() {
   const [inferring,   setInferring]   = useState<Record<string, boolean>>({});
   const [videos,      setVideos]      = useState<Record<string, string>>({});
   const [videoModal,  setVideoModal]  = useState<{ agentId: string; url: string; envId: string; envFamily: EnvFamily } | null>(null);
-  const [grpoInfer,   setGrpoInfer]   = useState<Record<string, InferenceCase[]>>({});
+  const [grpoInfer,   setGrpoInfer]   = useState<Record<string, GrpoInferData>>({});
   const [wandbArtifacts, setWandbArtifacts] = useState<Record<string, string>>({});
   const [hfRepoUrl,   setHfRepoUrl]   = useState("");
   const [hfSnippet,   setHfSnippet]   = useState("");
@@ -836,7 +912,7 @@ export default function HomePage() {
   }, [phase]);
 
   useEffect(() => {
-    if (phase === "done" && best?.algo === "GRPO" && !grpoInfer[best.agent_id])
+    if (phase === "done" && best?.algo === "GRPO" && !grpoInfer[best.agent_id]?.results?.length)
       handleGrpoInfer(best.agent_id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, best]);
@@ -883,13 +959,13 @@ export default function HomePage() {
   };
 
   const handleGrpoInfer = async (agentId: string) => {
-    if (grpoInfer[agentId]) return;
+    if (grpoInfer[agentId]?.results?.length) return;
     setInferring(p => ({ ...p, [agentId]: true }));
     try {
       const res = await fetch(`${BACKEND}/api/inference/${runName}/${agentId}`);
       if (!res.ok) throw new Error((await res.json().catch(() => ({ detail: res.statusText }))).detail);
       const data = await res.json();
-      setGrpoInfer(p => ({ ...p, [agentId]: data.results }));
+      setGrpoInfer(p => ({ ...p, [agentId]: { results: data.results ?? [], baseline: data.baseline ?? [] } }));
       if (data.wandb_artifact) setWandbArtifacts(p => ({ ...p, [agentId]: data.wandb_artifact }));
     } catch (e) { alert(`Inference failed: ${e instanceof Error ? e.message : String(e)}`); }
     finally { setInferring(p => ({ ...p, [agentId]: false })); }
@@ -1119,8 +1195,10 @@ export default function HomePage() {
                     <button onClick={() => handleInfer(best.agent_id)} disabled={!!inferring[best.agent_id]}
                       className="border border-[#333] hover:border-amber-600 text-gray-500 hover:text-amber-400 px-2.5 py-1 transition-colors disabled:opacity-40">
                       {inferring[best.agent_id]
-                        ? (best.algo === "GRPO" ? "loading…" : "recording…")
-                        : (best.algo === "GRPO" ? "test" : "infer")}
+                        ? (best.algo === "GRPO" ? "⏳ Loading…" : "⏳ Recording…")
+                        : (best.algo === "GRPO"
+                          ? (grpoInfer[best.agent_id]?.results?.length ? "✅ Before/After loaded" : "🧪 View before/after")
+                          : "▶ Watch inference")}
                     </button>
                   </div>
                   <div className="px-4 py-3 flex gap-8 border-b border-[#1a1a1a]">
@@ -1170,10 +1248,15 @@ export default function HomePage() {
                 </div>
               )}
 
-              {best && grpoInfer[best.agent_id] && (
-                <InferenceShowcase cases={grpoInfer[best.agent_id]}
-                  agentId={best.agent_id} wandbArtifact={wandbArtifacts[best.agent_id]} />
-              )}
+              {/* GRPO before/after showcase for winning agent */}
+              {best && grpoInfer[best.agent_id]?.results?.length ? (
+                <InferenceShowcase
+                  cases={grpoInfer[best.agent_id].results}
+                  baseline={grpoInfer[best.agent_id].baseline}
+                  agentId={best.agent_id}
+                  wandbArtifact={wandbArtifacts[best.agent_id]}
+                />
+              ) : null}
 
               <Divider label="all agents" />
 

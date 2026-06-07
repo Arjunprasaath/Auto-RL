@@ -480,10 +480,17 @@ def get_inference(run_name: str, agent_id: str) -> dict:
             ev = json.load(f)
         wandb_artifact = ev.get("wandb_artifact", "")
 
+    baseline_path = Path(run_dir) / agent_id / "baseline_responses.json"
+    baseline = []
+    if baseline_path.exists():
+        with open(baseline_path) as f:
+            baseline = json.load(f)
+
     return {
         "agent_id": agent_id,
         "wandb_artifact": wandb_artifact,
         "results": data,
+        "baseline": baseline,
     }
 
 

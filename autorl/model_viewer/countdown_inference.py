@@ -29,7 +29,7 @@ from environments.countdown_env import (
     load_countdown_dataset,
 )
 
-BASE_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+BASE_MODEL = "Qwen/Qwen2.5-3B"
 
 
 def run_inference(

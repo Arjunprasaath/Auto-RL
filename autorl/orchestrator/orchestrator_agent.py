@@ -110,9 +110,9 @@ Return JSON matching this schema exactly:
       "algo": "GRPO",
       "env": "Countdown",
       "exec": "runpod",
-      "time_budget_min": 1,
+      "time_budget_min": 60,
       "hparams": {{
-        "model": "Qwen/Qwen2.5-3B-Instruct",
+        "model": "Qwen/Qwen2.5-3B",
         "lr": 0.000001,
         "num_generations": 4,
         "temperature": 1.0,
@@ -201,12 +201,12 @@ Environments (use the ALE/ prefix exactly):
 - Optional for SAC: ent_coef (0.0–0.1)
 - Do NOT add n_steps for SAC-only agents.
 
-### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}", time_budget_min: 1)
+### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}", time_budget_min: 60)
 - env: exactly "Countdown"
 - algo: exactly "GRPO"
 - Task: use given numbers with +, -, *, / to reach a target number
 - Required hparams:
-  - model: always "Qwen/Qwen2.5-3B-Instruct"
+  - model: always "Qwen/Qwen2.5-3B"
   - lr: float (default 1e-6; vary slightly, e.g. 5e-7 vs 2e-6)
   - seed: int, MUST differ for every agent
 - Optional hparams: num_generations (default 4; try 8), temperature (0.7–1.0)
@@ -396,7 +396,7 @@ _orchestrator = Agent(
     output_type=AgentOutputSchema(SpawnPlan, strict_json_schema=False),
 )
 
-_G = "Qwen/Qwen2.5-3B-Instruct"
+_G = "Qwen/Qwen2.5-3B"
 _SB3_ALGOS = frozenset({"PPO", "SAC", "A2C"})
 _DISCRETE_ONLY_ALGOS = frozenset({"PPO", "A2C"})  # SAC requires continuous action spaces
 _COUNTDOWN_EXEC = _countdown_exec()
@@ -423,8 +423,8 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
     for e in plan:
         if e.env == "Countdown":
             # GRPO / LLM path
-            if e.algo != "GRPO" or e.time_budget_min != 1:
-                raise ValueError(f"{e.id}: Countdown needs algo=GRPO, time_budget_min=1")
+            if e.algo != "GRPO" or e.time_budget_min < 1:
+                raise ValueError(f"{e.id}: Countdown needs algo=GRPO and a positive time_budget_min")
             if e.exec not in ("local", "runpod"):
                 raise ValueError(f"{e.id}: Countdown exec must be local or runpod")
             if e.exec != _COUNTDOWN_EXEC:

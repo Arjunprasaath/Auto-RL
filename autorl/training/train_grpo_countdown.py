@@ -1,23 +1,20 @@
 """
-GRPO cold-start training on the Countdown arithmetic puzzle (Person B).
+GRPO cold-start training on the Countdown arithmetic puzzle (TinyZero-style).
 
-Runs on RunPod GPU (/workspace/venv/bin/python). No SFT required —
-Qwen2.5-3B-Instruct already understands arithmetic format; GRPO trains
-multi-step planning from scratch.
+Uses Qwen2.5-3B BASE model (not instruct) so reasoning emerges from scratch.
+The model starts with no chain-of-thought and develops <think>/<answer> structure
+through the format + accuracy reward signal — the before/after is the demo.
 
 Data contract (same as MuJoCo scripts):
   - heartbeat.json written every 60s (via HeartbeatWriter)
   - honours Sentinel nudges (results/{agent_id}/nudge.json)
   - writes eval_result.json on completion
+  - writes baseline_responses.json (pre-training) and inference_results.json (post-training)
 
 Run from /workspace (repo root on the pod), e.g.:
     /workspace/venv/bin/python training/train_grpo_countdown.py \
         --agent-id agent_4 --time-budget 1200 --lr 1e-6 --seed 42 \
         --results-dir /workspace/results
-
-CLI args match what Person A's training_agent.py wrapper passes:
-    --agent-id, --time-budget, --lr, --seed, --results-dir
-(Note: --env-id is accepted but ignored; environment is always Countdown)
 """
 
 import argparse
@@ -38,35 +35,22 @@ except ImportError:
 
 import torch
 import weave
-from datasets import load_dataset
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
-from environments.countdown_env import evaluate_solution, generate_countdown_prompt, load_countdown_dataset
+from environments.countdown_env import (
+    SYSTEM_PROMPT,
+    accuracy_reward_fn,
+    evaluate_solution,
+    format_reward_fn,
+    generate_countdown_prompt,
+    load_countdown_dataset,
+)
 from training.callbacks.heartbeat_writer import HeartbeatWriter
 
-MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-
-
-def countdown_reward_fn(
-    completions: list,
-    prompts: list[str],
-    target: list[int],
-    numbers: list[list[int]],
-    **kwargs,
-) -> list[float]:
-    """Reward function passed to GRPOTrainer."""
-    rewards = []
-    for completion, t, nums in zip(completions, target, numbers):
-        if isinstance(completion, list):
-            text = completion[-1]["content"] if completion else ""
-        elif isinstance(completion, dict):
-            text = completion.get("content", "")
-        else:
-            text = str(completion)
-        rewards.append(evaluate_solution(text, t, nums))
-    return rewards
+# Base model — no RLHF constraints, reasoning emerges from scratch via GRPO
+MODEL_NAME = "Qwen/Qwen2.5-3B"
 
 
 def init_weave(agent_id: str):
@@ -81,8 +65,6 @@ def init_weave(agent_id: str):
         print(f"[weave] tracing to project '{project}'")
     except Exception as e:
         print(f"[weave] init skipped ({e})")
-
-
 
 
 class HeartbeatTrainerCallback(TrainerCallback):
@@ -128,8 +110,35 @@ class NudgeCallback(TrainerCallback):
         return control
 
 
+def _run_inference(model, tokenizer, cases: list, agent_id: str, label: str) -> list[dict]:
+    """Generate responses for a list of test cases and return structured results."""
+    results = []
+    model.eval()
+    for row in cases:
+        msgs = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": generate_countdown_prompt(row["nums"], row["target"])},
+        ]
+        inputs = tokenizer.apply_chat_template(
+            msgs, return_tensors="pt", add_generation_prompt=True
+        ).to(model.device)
+        with torch.no_grad():
+            out = model.generate(inputs, max_new_tokens=512, temperature=0.7, do_sample=True)
+        response = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        score = evaluate_solution(response, row["target"], row["nums"])
+        results.append({
+            "numbers": row["nums"],
+            "target": row["target"],
+            "model_response": response,
+            "success": score == 1.0,
+        })
+        tag = "ok" if score == 1.0 else "fail"
+        print(f"  [{label}] [{row['nums']} -> {row['target']}] {tag}")
+    return results
+
+
 def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, results_dir, device="auto"):
-    """Time-budgeted GRPO training on Countdown. Traced as a Weave op."""
+    """Time-budgeted GRPO training on Countdown."""
     os.makedirs(f"{results_dir}/{agent_id}", exist_ok=True)
 
     hb = HeartbeatWriter(agent_id, results_dir)
@@ -137,6 +146,9 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
 
     print(f"[{agent_id}] Loading model {MODEL_NAME} on {device}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     if device == "mps":
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, torch_dtype=torch.float16,
@@ -156,14 +168,27 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         target_modules=["q_proj", "v_proj"],
     )
 
+    # --- Pre-training baseline: record 5 responses before any training ---
+    print(f"[{agent_id}] Recording pre-training baseline (5 examples)...")
+    test_dataset = load_countdown_dataset(split="test", seed=seed)
+    showcase_cases = list(test_dataset)[:5]
+    baseline_results = _run_inference(model, tokenizer, showcase_cases, agent_id, "pre")
+    baseline_path = f"{results_dir}/{agent_id}/baseline_responses.json"
+    with open(baseline_path, "w") as f:
+        json.dump(baseline_results, f, indent=2)
+    print(f"[{agent_id}] Baseline saved: {baseline_path}")
+
     print(f"[{agent_id}] Loading dataset...")
     dataset = load_countdown_dataset(split="train", seed=seed)
     dataset = dataset.shuffle(seed=seed)
-    dataset = dataset.select(range(min(5_000, len(dataset))))  # prevent GRPOTrainer init hang
+    dataset = dataset.select(range(min(3_000, len(dataset))))  # prevent GRPOTrainer init hang
 
     def format_row(row):
         return {
-            "prompt": [{"role": "user", "content": generate_countdown_prompt(row["nums"], row["target"])}],
+            "prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": generate_countdown_prompt(row["nums"], row["target"])},
+            ],
             "target": row["target"],
             "numbers": row["nums"],
         }
@@ -178,12 +203,12 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         learning_rate=lr,
         per_device_train_batch_size=_batch_size,
         num_generations=num_generations,
-        max_completion_length=256,
+        max_completion_length=512,
         temperature=temperature,
         seed=seed,
         output_dir=f"{results_dir}/{agent_id}",
         logging_steps=1,
-        save_steps=9999,  # don't auto-save; we save manually at the end
+        save_steps=9999,
         max_steps=10_000,  # safety ceiling; TimeBudgetCallback stops earlier
         report_to="wandb" if os.environ.get("WANDB_API_KEY") else "none",
         bf16=_bf16_ok,
@@ -195,7 +220,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         args=grpo_config,
         processing_class=tokenizer,
         train_dataset=formatted,
-        reward_funcs=countdown_reward_fn,
+        reward_funcs=[format_reward_fn, accuracy_reward_fn],
         peft_config=lora_config,
     )
 
@@ -213,50 +238,23 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     mean_reward = sum(log.get("reward", 0.0) for log in recent) / max(len(recent), 1)
     step = trainer.state.global_step
 
-    # Evaluate on 100 test puzzles (held-out 5% split)
-    print(f"[{agent_id}] Evaluating on test set...")
-    test_dataset = load_countdown_dataset(split="test", seed=seed)
-    total = min(10, len(test_dataset))
-    correct = 0
-
-    model.eval()
-    for row in list(test_dataset)[:total]:
-        prompt = generate_countdown_prompt(row["nums"], row["target"])
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=256, temperature=0.1, do_sample=False)
-        completion = tokenizer.decode(output[0], skip_special_tokens=True)
-        if evaluate_solution(completion, row["target"], row["nums"]) == 1.0:
-            correct += 1
-
-    mean_return = correct / total
-    print(f"[{agent_id}] Test accuracy: {correct}/{total} ({mean_return:.1%})")
-
-    print(f"[{agent_id}] Running inference showcase on 5 test cases...")
-    showcase_cases = list(test_dataset)[:5]
-    inference_results = []
-    for row in showcase_cases:
-        prompt = generate_countdown_prompt(row["nums"], row["target"])
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=256, temperature=0.1, do_sample=False)
-        full_text = tokenizer.decode(out[0], skip_special_tokens=True)
-        response = full_text[len(prompt):]
-        score = evaluate_solution(response, row["target"], row["nums"])
-        inference_results.append({
-            "numbers": row["nums"],
-            "target": row["target"],
-            "prompt": prompt,
-            "model_response": response,
-            "success": score == 1.0,
-        })
-        tag = "ok" if score == 1.0 else "fail"
-        print(f"  [{row['nums']} -> {row['target']}] {tag}")
-
+    # --- Post-training evaluation on same 5 cases (for before/after comparison) ---
+    print(f"[{agent_id}] Running post-training inference on same 5 cases...")
+    inference_results = _run_inference(model, tokenizer, showcase_cases, agent_id, "post")
     infer_path = f"{results_dir}/{agent_id}/inference_results.json"
     with open(infer_path, "w") as f:
         json.dump(inference_results, f, indent=2)
     print(f"[{agent_id}] Inference results saved: {infer_path}")
+
+    # --- Accuracy eval on held-out test set ---
+    print(f"[{agent_id}] Evaluating on test set...")
+    total = min(10, len(test_dataset))
+    correct = sum(
+        1 for r in _run_inference(model, tokenizer, list(test_dataset)[:total], agent_id, "eval")
+        if r["success"]
+    )
+    mean_return = correct / total
+    print(f"[{agent_id}] Test accuracy: {correct}/{total} ({mean_return:.1%})")
 
     ckpt_path = f"{results_dir}/{agent_id}/checkpoint"
     trainer.save_model(ckpt_path)
@@ -308,7 +306,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--env-id", default="Countdown")  # accepted but unused
-    parser.add_argument("--time-budget", type=int, default=1200)  # 20 min
+    parser.add_argument("--time-budget", type=int, default=3600)  # 60 min
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-generations", type=int, default=4)

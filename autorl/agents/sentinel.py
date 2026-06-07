@@ -36,8 +36,8 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 CHECK_INTERVAL_S = 30
-NUDGE_THRESHOLD_S = 120
-KILL_THRESHOLD_S = 240
+NUDGE_THRESHOLD_S = 600   # 10 min — GRPO model loading + first batch takes 5-10 min
+KILL_THRESHOLD_S = 1200   # 20 min — allow full pod provisioning + startup after nudge
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini-2026-03-17")
 
@@ -207,8 +207,9 @@ async def run_sentinel(
     from orchestrator.orchestrator_agent import SpawnPlanEntry
 
     nudged: dict[str, datetime] = {}
-    restarted: set[str] = set()
+    restarted: dict[str, datetime] = {}
     killed: set[str] = set()
+    RESTART_GRACE_S = 900  # 15 min grace after restart for pod provisioning + startup
 
     log_path = os.path.join(results_dir, "sentinel_log.json")
 
@@ -289,7 +290,7 @@ async def run_sentinel(
             print(f"[sentinel] {agent_id}: restart outcome={outcome}")
 
         asyncio.create_task(_run_and_log())
-        restarted.add(agent_id)
+        restarted[agent_id] = datetime.now(timezone.utc)
 
     async def _nudge_with_llm(agent_id: str, hb: dict) -> None:
         """Write nudge.json with LLM-suggested hparams; do not kill the agent."""
@@ -367,15 +368,20 @@ async def run_sentinel(
             if hb.get("status") in ("completed", "failed"):
                 continue
 
-            # ── Stale heartbeat: LLM nudge at 120 s ──────────────────────────
+            # ── Stale heartbeat: LLM nudge ────────────────────────────────────
             if age_s > NUDGE_THRESHOLD_S and agent_id not in nudged:
                 await _nudge_with_llm(agent_id, hb)
 
-            # ── Still stale after nudge: LLM kill + restart at 240 s ─────────
+            # ── Still stale after nudge: LLM kill + restart ─────────────────
             elif age_s > KILL_THRESHOLD_S and agent_id in nudged:
                 if agent_id not in restarted:
                     await _intervene(agent_id, "stale_after_nudge", hb)
                 else:
+                    restart_age = (now - restarted[agent_id]).total_seconds()
+                    if restart_age < RESTART_GRACE_S:
+                        print(f"[sentinel] {agent_id}: restarted {restart_age:.0f}s ago, "
+                              f"grace period {RESTART_GRACE_S}s — skipping")
+                        continue
                     print(f"[sentinel] {agent_id}: still stale after restart — killing permanently")
                     await kill_training_agent(agent_id)
                     killed.add(agent_id)

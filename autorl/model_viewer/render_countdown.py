@@ -30,7 +30,7 @@ def extract_prompt(sample: dict) -> str:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, help="Path to trained model checkpoint")
-    parser.add_argument("--base-model", default="Qwen/Qwen2.5-3B-Instruct", help="HuggingFace Hub ID of base model")
+    parser.add_argument("--base-model", default="Qwen/Qwen2.5-3B", help="HuggingFace Hub ID of base model")
     parser.add_argument("--output", required=True, help="Path to save output JSON")
     args = parser.parse_args()
 

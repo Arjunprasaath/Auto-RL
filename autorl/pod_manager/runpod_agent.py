@@ -323,7 +323,7 @@ if __name__ == "__main__":
         exec="runpod",
         time_budget_min=20,
         hparams={
-            "model": "Qwen/Qwen2.5-3B-Instruct",
+            "model": "Qwen/Qwen2.5-3B",
             "lr": 1e-6,
             "num_generations": 4,
             "temperature": 1.0,
