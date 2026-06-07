@@ -128,48 +128,66 @@ Return JSON matching this schema exactly:
 Required fields on every entry:
 - id: string, unique, sequential — "agent_1", "agent_2", ...
 - algo: one of "PPO", "SAC", "A2C", "GRPO"
-- env: environment id string (see below)
-- exec: exactly "local" or "runpod" (must match the environment family)
+- env: a valid Gymnasium environment id string (see families below)
+- exec: exactly "local" or "runpod" (all Gymnasium/SB3 envs MUST be "local")
 - time_budget_min: integer minutes (see below)
 - hparams: object of numeric/string hyperparameters (never omit; use {{}} only if truly none apply)
 
 ## Environment families
 
-### MuJoCo locomotion (exec MUST be "local")
-- env: "HalfCheetah-v5" or "Hopper-v5"
-- algo: "PPO", "SAC", or "A2C" (Stable-Baselines3)
-- time_budget_min: 2
-- Required hparams:
-  - lr: float learning rate (default 3e-4; vary across agents, e.g. 1e-4, 3e-4, 1e-3)
-  - gamma: float discount (default 0.99)
-  - seed: int, MUST differ for every agent (even same algo)
-- Optional hparams (vary for diversity):
-  - n_steps: int rollout length for PPO/A2C only (default 2048; try 512 or 4096)
-  - ent_coef: float entropy bonus 0.0–0.05 (SAC/PPO/A2C)
-- SAC ignores n_steps; do not require it for SAC-only agents.
+### Gymnasium / Stable-Baselines3 environments (exec MUST be "local", time_budget_min: 2)
 
-### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}")
+Use algo "PPO", "SAC", or "A2C". Pick the env that best matches the user's task.
+You may use ANY valid Gymnasium environment id. Common ones grouped by type:
+
+**MuJoCo continuous control** (all algos work):
+- HalfCheetah-v5, Hopper-v5, Ant-v5, Walker2d-v5, Swimmer-v5
+- Humanoid-v5, HumanoidStandup-v5, Reacher-v5, Pusher-v5
+- InvertedPendulum-v5, InvertedDoublePendulum-v5
+
+**Classic Control** (PPO and A2C work; SAC requires continuous action space):
+- CartPole-v1 (discrete → PPO/A2C only)
+- MountainCar-v0 (discrete → PPO/A2C only)
+- MountainCarContinuous-v0 (continuous → all algos)
+- Pendulum-v1 (continuous → all algos)
+- Acrobot-v1 (discrete → PPO/A2C only)
+
+**Box2D** (requires `pip install gymnasium[box2d]`):
+- LunarLander-v3 (discrete → PPO/A2C only)
+- LunarLanderContinuous-v3 (continuous → all algos)
+- BipedalWalker-v3 (continuous → all algos)
+- CarRacing-v3 (continuous, pixel obs → PPO/A2C only, use CnnPolicy)
+
+**IMPORTANT action-space rules:**
+- SAC ONLY supports continuous (Box) action spaces — never assign SAC to CartPole, MountainCar-v0, LunarLander-v3, Acrobot, or any other discrete env.
+- PPO and A2C support both discrete and continuous action spaces.
+- For pixel-observation envs (CarRacing), set hparams policy="CnnPolicy"; for all others use "MlpPolicy" (default).
+
+**SB3 hparams (for any Gymnasium env):**
+- Required: lr (float, default 3e-4), gamma (float, default 0.99), seed (int, unique per algo)
+- Optional for PPO/A2C: n_steps (int rollout length, default 2048; try 512 or 4096), ent_coef (0.0–0.05)
+- Optional for SAC: ent_coef (0.0–0.1)
+- Do NOT add n_steps for SAC-only agents.
+
+### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}", time_budget_min: 5)
 - env: exactly "Countdown"
 - algo: exactly "GRPO"
-- time_budget_min: 5
 - Task: use given numbers with +, -, *, / to reach a target number
 - Required hparams:
   - model: always "Qwen/Qwen2.5-3B-Instruct"
   - lr: float (default 1e-6; vary slightly, e.g. 5e-7 vs 2e-6)
   - seed: int, MUST differ for every agent
-- Optional hparams (vary for diversity):
-  - num_generations: int group size per prompt (default 4; try 8)
-  - temperature: float sampling temperature 0.7–1.0
+- Optional hparams: num_generations (default 4; try 8), temperature (0.7–1.0)
 
 ## Planning rules
-1. Default to exactly 4 agents unless the user explicitly asks for a different count.
-2. Match agents to the user task: MuJoCo-only tasks → all local MuJoCo agents;
-   Countdown/LLM tasks → include GRPO agents with exec="{countdown_exec}"; mixed tasks → blend both families.
+1. Spawn a maximum of 10 agents unless the user explicitly asks for a different count.
+2. Match agents to the user task — infer the most appropriate Gymnasium env(s) from the description.
+   If the user names a specific env (e.g. "CartPole", "Ant"), use it exactly.
 3. Vary algo, env, lr, n_steps, and ent_coef across agents so the race is informative.
 4. Every agent with the same algo MUST have a different seed.
 5. Include EXACTLY ONE agent anywhere in the plan with hparams.lr = 1.0 (Sentinel fault-tolerance demo).
    All other agents must use sensible learning rates (never 1.0 except that one agent).
-6. Do not invent environments, algorithms, or exec values outside those listed above.
+6. Never use SAC for discrete-action environments.
 """
 
 
@@ -185,18 +203,18 @@ _orchestrator = Agent(
 )
 
 _G = "Qwen/Qwen2.5-3B-Instruct"
-_MUJOCO_ENVS = frozenset({"HalfCheetah-v5", "Hopper-v5"})
-_MUJOCO_ALGOS = frozenset({"PPO", "SAC", "A2C"})
+_SB3_ALGOS = frozenset({"PPO", "SAC", "A2C"})
+_DISCRETE_ONLY_ALGOS = frozenset({"PPO", "A2C"})  # SAC requires continuous action spaces
 _COUNTDOWN_EXEC = _countdown_exec()
 _DEFAULT_PLAN = [
     SpawnPlanEntry(id="agent_1", algo="PPO", env="HalfCheetah-v5", exec="local", time_budget_min=2,
                    hparams={"lr": 3e-4, "gamma": 0.99, "n_steps": 2048, "seed": 42}),
     SpawnPlanEntry(id="agent_2", algo="SAC", env="HalfCheetah-v5", exec="local", time_budget_min=2,
                    hparams={"lr": 1e-3, "gamma": 0.99, "seed": 7}),
-    SpawnPlanEntry(id="agent_3", algo="GRPO", env="Countdown", exec=_COUNTDOWN_EXEC, time_budget_min=5,
-                   hparams={"model": _G, "lr": 1e-6, "num_generations": 4, "seed": 42}),
-    SpawnPlanEntry(id="agent_4", algo="GRPO", env="Countdown", exec=_COUNTDOWN_EXEC, time_budget_min=5,
-                   hparams={"model": _G, "lr": 1.0, "num_generations": 8, "seed": 123}),
+    SpawnPlanEntry(id="agent_3", algo="A2C", env="Hopper-v5", exec="local", time_budget_min=2,
+                   hparams={"lr": 7e-4, "gamma": 0.99, "n_steps": 512, "seed": 99}),
+    SpawnPlanEntry(id="agent_4", algo="PPO", env="HalfCheetah-v5", exec="local", time_budget_min=2,
+                   hparams={"lr": 1.0, "gamma": 0.99, "n_steps": 4096, "seed": 77}),
 ]
 
 
@@ -209,12 +227,10 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
         raise ValueError("duplicate agent ids")
     seeds: dict[str, set] = {}
     for e in plan:
-        if e.env in _MUJOCO_ENVS:
-            if e.exec != "local" or e.algo not in _MUJOCO_ALGOS or e.time_budget_min != 2:
-                raise ValueError(f"{e.id}: MuJoCo needs exec=local, algo PPO/SAC/A2C, time_budget_min=2")
-        elif e.env == "Countdown":
+        if e.env == "Countdown":
+            # GRPO / LLM path
             if e.algo != "GRPO" or e.time_budget_min != 5:
-                raise ValueError(f"{e.id}: Countdown needs algo GRPO, time_budget_min=5")
+                raise ValueError(f"{e.id}: Countdown needs algo=GRPO, time_budget_min=5")
             if e.exec not in ("local", "runpod"):
                 raise ValueError(f"{e.id}: Countdown exec must be local or runpod")
             if e.exec != _COUNTDOWN_EXEC:
@@ -223,7 +239,13 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
                     f"(sb3={resolve_sb3_device()}, grpo={resolve_grpo_device()})"
                 )
         else:
-            raise ValueError(f"{e.id}: unknown env {e.env!r}")
+            # Any Gymnasium environment via Stable-Baselines3
+            if e.algo not in _SB3_ALGOS:
+                raise ValueError(f"{e.id}: Gymnasium envs need algo PPO/SAC/A2C, got {e.algo!r}")
+            if e.exec != "local":
+                raise ValueError(f"{e.id}: Gymnasium/SB3 envs must use exec=local")
+            if e.time_budget_min != 2:
+                raise ValueError(f"{e.id}: Gymnasium/SB3 envs need time_budget_min=2")
         seed = e.hparams.get("seed")
         if seed is None:
             raise ValueError(f"{e.id}: hparams.seed required")

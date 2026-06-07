@@ -19,7 +19,6 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +75,9 @@ class RunRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-RUNS_BASE  = _PKG_ROOT / "runs"
-VIDEO_DIR  = _PKG_ROOT / "ui" / "agent" / "videos"
+RUNS_BASE = _PKG_ROOT / "runs"
+VIDEO_DIR = _PKG_ROOT / "ui" / "agent" / "videos"
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-
-_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def _run_name(run_dir: str) -> str:
@@ -251,50 +248,14 @@ class InferRequest(BaseModel):
     agent_id: str
 
 
-def _run_inference_sync(run_dir: str, agent_id: str, algo: str, env_name: str) -> str:
-    """Blocking: load SB3 model, record one episode, return mp4 filename."""
-    from stable_baselines3 import PPO, SAC, A2C  # type: ignore
-    import gymnasium as gym
-    from gymnasium.wrappers import RecordVideo  # type: ignore
-
-    ALGO_MAP = {"PPO": PPO, "SAC": SAC, "A2C": A2C}
-    AlgoClass = ALGO_MAP.get(algo)
-    if AlgoClass is None:
-        raise ValueError(f"Inference not supported for algo '{algo}' (only PPO/SAC/A2C)")
-
-    model_path = Path(run_dir) / agent_id / "model.zip"
-    if not model_path.exists():
-        raise FileNotFoundError(f"No checkpoint yet for {agent_id} — training still in progress?")
-
-    prefix = f"{agent_id}_{int(time.time())}"
-    env = gym.make(env_name, render_mode="rgb_array")
-    env = RecordVideo(
-        env,
-        video_folder=str(VIDEO_DIR),
-        name_prefix=prefix,
-        episode_trigger=lambda ep: ep == 0,
-        disable_logger=True,
-    )
-
-    model = AlgoClass.load(str(model_path), env=env, device="cpu")
-    obs, _ = env.reset()
-    done = False
-    while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, _, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-    env.close()
-
-    # gymnasium RecordVideo saves as <prefix>-episode-0.mp4
-    candidates = sorted(VIDEO_DIR.glob(f"{prefix}*.mp4"))
-    if not candidates:
-        raise FileNotFoundError("RecordVideo did not produce an mp4 file")
-    return candidates[-1].name
-
-
 @app.post("/api/infer")
 async def infer_agent(req: InferRequest) -> dict:
-    """Record a one-episode video for the given agent and return the filename."""
+    """Record one episode for the given agent and return the mp4 filename.
+
+    Runs render_mujoco.py in a *subprocess* (not a thread) so MuJoCo can
+    initialise its OpenGL context on the subprocess's main thread — required
+    on macOS, which forbids OpenGL from non-main threads.
+    """
     run = _runs.get(req.run_name)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run '{req.run_name}' not found")
@@ -308,15 +269,33 @@ async def infer_agent(req: InferRequest) -> dict:
     env_name = entry["env"]
     run_dir  = run["run_dir"]
 
-    loop = asyncio.get_event_loop()
-    try:
-        filename = await loop.run_in_executor(
-            _executor,
-            _run_inference_sync,
-            run_dir, req.agent_id, algo, env_name,
-        )
-    except (ValueError, FileNotFoundError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if algo not in ("PPO", "SAC", "A2C"):
+        raise HTTPException(status_code=400, detail=f"Inference not supported for algo '{algo}' (only PPO/SAC/A2C)")
+
+    model_path = Path(run_dir) / req.agent_id / "model.zip"
+    if not model_path.exists():
+        raise HTTPException(status_code=400, detail=f"No checkpoint yet for {req.agent_id} — still training?")
+
+    filename    = f"{req.agent_id}_{int(time.time())}.mp4"
+    output_path = str(VIDEO_DIR / filename)
+
+    render_script = str(_PKG_ROOT / "model_viewer" / "render_mujoco.py")
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, render_script,
+        "--checkpoint", str(model_path),
+        "--env-id",     env_name,
+        "--algo",       algo,
+        "--output",     output_path,
+        "--n-steps",    "1000",
+        cwd=str(_PKG_ROOT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        detail = stderr.decode(errors="replace").strip().splitlines()[-1] if stderr else "render failed"
+        raise HTTPException(status_code=500, detail=detail)
 
     return {"filename": filename, "url": f"/api/video/{filename}"}
 

@@ -239,10 +239,9 @@ function LiveAgentCard({
           {canInfer && (
             <button onClick={onInfer} disabled={inferring}
               className={`text-xs px-2 py-0.5 rounded-lg font-semibold transition-colors
-                ${hasVideo ? "bg-emerald-900 text-emerald-300 hover:bg-emerald-800" :
-                  inferring ? "bg-gray-800 text-gray-500 cursor-not-allowed" :
+                ${inferring ? "bg-gray-800 text-gray-500 cursor-not-allowed" :
                   "bg-gray-800 text-gray-400 hover:bg-violet-900 hover:text-violet-300 border border-gray-700"}`}>
-              {inferring ? "⏳ …" : hasVideo ? "▶ replay" : "▶ infer"}
+              {inferring ? "⏳ recording…" : "▶ infer"}
             </button>
           )}
           <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[status] ?? "bg-gray-800 text-gray-500"}`}>
@@ -596,11 +595,7 @@ export default function HomePage() {
   };
 
   const handleInfer = async (agentId: string) => {
-    // If we already have the video, just show it
-    if (videos[agentId]) {
-      setVideoModal({ agentId, url: `${BACKEND}/api/video/${videos[agentId]}` });
-      return;
-    }
+    // Always infer fresh from the best checkpoint at this moment
     setInferring(p => ({ ...p, [agentId]: true }));
     try {
       const res = await fetch(`${BACKEND}/api/infer`, {
@@ -612,7 +607,6 @@ export default function HomePage() {
         throw new Error(err.detail ?? res.statusText);
       }
       const data = await res.json();
-      setVideos(p => ({ ...p, [agentId]: data.filename }));
       setVideoModal({ agentId, url: `${BACKEND}/api/video/${data.filename}` });
     } catch (e) {
       alert(`Inference failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -823,7 +817,7 @@ export default function HomePage() {
                     <button onClick={() => handleInfer(best.agent_id)}
                       disabled={!!inferring[best.agent_id]}
                       className="ml-auto text-xs px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-emerald-200 font-semibold transition-colors disabled:opacity-50">
-                      {inferring[best.agent_id] ? "⏳ Recording…" : videos[best.agent_id] ? "▶ Replay" : "▶ Watch inference"}
+                      {inferring[best.agent_id] ? "⏳ Recording…" : "▶ Watch inference"}
                     </button>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-center mb-3">
