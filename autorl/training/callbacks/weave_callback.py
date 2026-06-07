@@ -81,3 +81,17 @@ class WeaveLogCallback(BaseCallback):
             weave.log(payload)
         except Exception:
             pass
+
+        # Also push directly to W&B so the reward curve appears natively in W&B
+        # charts (TensorBoard sync captures training-loss metrics but not episodic
+        # return, which is computed here from infos["episode"]["r"]).
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log(
+                    {"train/ep_rew_mean": mean_return},
+                    step=self.num_timesteps,
+                    commit=False,
+                )
+        except Exception:
+            pass

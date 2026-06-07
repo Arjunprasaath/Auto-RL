@@ -316,6 +316,24 @@ class RedisCoordinator:
             print(f"[coordinator] get_run_history failed ({e})")
             return []
 
+    def get_best_peer_reward(self, run_id: str, my_agent_id: str) -> float | None:
+        """Return the highest current_reward seen among all *other* active agents.
+
+        Used by race dropout: if this agent is far behind the leader it exits
+        early and frees up compute for another trial.  Returns None when Redis
+        is unavailable or no other agent has reported a heartbeat yet.
+        """
+        all_hb = self.get_all_heartbeats(run_id)
+        if not all_hb:
+            return None
+        rewards = [
+            data.get("current_reward", 0.0)
+            for agent_id, data in all_hb.items()
+            if agent_id != my_agent_id
+            and data.get("status") not in ("completed", "failed", "race_dropout", "early_stopped")
+        ]
+        return max(rewards) if rewards else None
+
     def get_all_history_envs(self) -> list[tuple[str, str]]:
         """Return (algo, env) pairs that have any history stored."""
         r = self._sync()

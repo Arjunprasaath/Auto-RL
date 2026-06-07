@@ -52,6 +52,60 @@ def start_wandb_run(agent_id, algo, env_id, lr, seed, results_dir):
     return run, tb_log, WandbCallback(verbose=0)
 
 
+def find_warm_start_checkpoint(algo: str, env_id: str, results_dir: str) -> str | None:
+    """Download the best past model artifact from W&B to warm-start training.
+
+    Queries the W&B API for the highest-scoring finished run matching this
+    algo+env, downloads its model artifact to a local cache, and returns the
+    path to the .zip file.  Returns None when W&B is disabled, no matching
+    past run exists, or the download fails — callers always fall back to
+    training from scratch.
+    """
+    if not wandb_enabled():
+        return None
+    entity = os.environ.get("WANDB_ENTITY", "")
+    project = os.environ.get("WEAVE_PROJECT", "autorl")
+    if not entity:
+        return None
+    try:
+        import wandb
+        api = wandb.Api(timeout=15)
+        runs = api.runs(
+            f"{entity}/{project}",
+            filters={
+                "config.algo": algo,
+                "config.env": env_id,
+                "state": "finished",
+            },
+            order="-summary_metrics.mean_return",
+            per_page=1,
+        )
+        best_run = next(iter(runs), None)
+        if best_run is None:
+            print(f"[wandb] warm-start: no finished runs for {algo}/{env_id}")
+            return None
+        artifacts = [a for a in best_run.logged_artifacts() if a.type == "model"]
+        if not artifacts:
+            print(f"[wandb] warm-start: no model artifact in run {best_run.id}")
+            return None
+        art = artifacts[0]
+        warm_dir = os.path.join(results_dir, "_warm_start_cache", f"{algo}_{env_id}")
+        os.makedirs(warm_dir, exist_ok=True)
+        art.download(root=warm_dir)
+        for fname in os.listdir(warm_dir):
+            if fname.endswith(".zip"):
+                ckpt_path = os.path.join(warm_dir, fname)
+                ret = best_run.summary.get("mean_return")
+                ret_str = f"{ret:.1f}" if ret is not None else "?"
+                print(f"[wandb] warm-start: {ckpt_path} (run {best_run.id}, return={ret_str})")
+                return ckpt_path
+        print(f"[wandb] warm-start: download succeeded but no .zip in {warm_dir}")
+        return None
+    except Exception as e:  # noqa: BLE001
+        print(f"[wandb] warm-start lookup failed ({e})")
+        return None
+
+
 def log_model_artifact(
     run,
     checkpoint_path: str,
