@@ -108,8 +108,8 @@ Return JSON matching this schema exactly:
       "id": "agent_2",
       "algo": "GRPO",
       "env": "Countdown",
-      "exec": "{countdown_exec}",
-      "time_budget_min": 5,
+      "exec": "runpod",
+      "time_budget_min": 1,
       "hparams": {{
         "model": "Qwen/Qwen2.5-3B-Instruct",
         "lr": 0.000001,
@@ -184,7 +184,7 @@ Environments: LunarLander-v3 (discrete → PPO/A2C only),
 - Optional for SAC: ent_coef (0.0–0.1)
 - Do NOT add n_steps for SAC-only agents.
 
-### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}", time_budget_min: 5)
+### Countdown arithmetic puzzle (exec MUST be "{countdown_exec}", time_budget_min: 1)
 - env: exactly "Countdown"
 - algo: exactly "GRPO"
 - Task: use given numbers with +, -, *, / to reach a target number
@@ -245,8 +245,8 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
     for e in plan:
         if e.env == "Countdown":
             # GRPO / LLM path
-            if e.algo != "GRPO" or e.time_budget_min != 5:
-                raise ValueError(f"{e.id}: Countdown needs algo=GRPO, time_budget_min=5")
+            if e.algo != "GRPO" or e.time_budget_min != 1:
+                raise ValueError(f"{e.id}: Countdown needs algo=GRPO, time_budget_min=1")
             if e.exec not in ("local", "runpod"):
                 raise ValueError(f"{e.id}: Countdown exec must be local or runpod")
             if e.exec != _COUNTDOWN_EXEC:
@@ -283,7 +283,9 @@ def _validate_plan(entries: list) -> list[SpawnPlanEntry]:
 
 def _finalize(plan: list[SpawnPlanEntry], path: str) -> list[SpawnPlanEntry]:
     if not any(e.hparams.get("lr") == 1.0 for e in plan):
-        plan[-1].hparams["lr"] = 1.0
+        sb3_agents = [e for e in plan if e.algo in _SB3_ALGOS]
+        if sb3_agents:
+            sb3_agents[-1].hparams["lr"] = 1.0
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump([e.model_dump() for e in plan], f, indent=2)

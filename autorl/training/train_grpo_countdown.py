@@ -172,9 +172,11 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
 
     _cuda_ok = torch.cuda.is_available()
     _bf16_ok = _cuda_ok and torch.cuda.is_bf16_supported()
+    _default_bs = 2 if device == "mps" else 4
+    _batch_size = max(_default_bs, num_generations)
     grpo_config = GRPOConfig(
         learning_rate=lr,
-        per_device_train_batch_size=2 if device == "mps" else 4,
+        per_device_train_batch_size=_batch_size,
         num_generations=num_generations,
         max_completion_length=256,
         temperature=temperature,
@@ -230,9 +232,48 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
     mean_return = correct / total
     print(f"[{agent_id}] Test accuracy: {correct}/{total} ({mean_return:.1%})")
 
+    print(f"[{agent_id}] Running inference showcase on 5 test cases...")
+    showcase_cases = list(test_dataset)[:5]
+    inference_results = []
+    for row in showcase_cases:
+        prompt = generate_countdown_prompt(row["nums"], row["target"])
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=256, temperature=0.1, do_sample=False)
+        full_text = tokenizer.decode(out[0], skip_special_tokens=True)
+        response = full_text[len(prompt):]
+        score = evaluate_solution(response, row["target"], row["nums"])
+        inference_results.append({
+            "numbers": row["nums"],
+            "target": row["target"],
+            "prompt": prompt,
+            "model_response": response,
+            "success": score == 1.0,
+        })
+        tag = "ok" if score == 1.0 else "fail"
+        print(f"  [{row['nums']} -> {row['target']}] {tag}")
+
+    infer_path = f"{results_dir}/{agent_id}/inference_results.json"
+    with open(infer_path, "w") as f:
+        json.dump(inference_results, f, indent=2)
+    print(f"[{agent_id}] Inference results saved: {infer_path}")
+
     ckpt_path = f"{results_dir}/{agent_id}/checkpoint"
     trainer.save_model(ckpt_path)
     print(f"[{agent_id}] Checkpoint saved: {ckpt_path}")
+
+    import wandb
+    wandb_artifact_name = ""
+    if wandb.run is not None:
+        try:
+            art_name = f"grpo-lora-{agent_id}"
+            art = wandb.Artifact(art_name, type="model")
+            art.add_dir(ckpt_path)
+            wandb.log_artifact(art)
+            wandb_artifact_name = art_name
+            print(f"[{agent_id}] LoRA adapter uploaded to W&B as '{art_name}'")
+        except Exception as e:
+            print(f"[{agent_id}] W&B artifact upload failed (non-fatal): {e}")
 
     weave_run_id = ""
     try:
@@ -253,6 +294,7 @@ def train_grpo(agent_id, time_budget, lr, seed, num_generations, temperature, re
         "wall_time_s": time.time() - start,
         "weave_run_id": weave_run_id,
         "checkpoint_path": ckpt_path,
+        "wandb_artifact": wandb_artifact_name,
     }
     with open(f"{results_dir}/{agent_id}/eval_result.json", "w") as f:
         json.dump(result, f, indent=2)

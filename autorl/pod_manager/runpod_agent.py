@@ -46,6 +46,8 @@ from orchestrator.orchestrator_agent import SpawnPlanEntry
 REMOTE_WORKSPACE = "/workspace"
 REMOTE_RESULTS = f"{REMOTE_WORKSPACE}/results"
 
+ACTIVE_PODS: dict[str, str] = {}  # agent_id -> pod_id
+
 
 def _scp_to_pod(local_path: str, remote_path: str, host: str, port: int) -> None:
     """SCP a local file or directory to the pod."""
@@ -125,11 +127,8 @@ def _build_train_cmd(entry: SpawnPlanEntry) -> str:
     return " ".join(parts)
 
 
-def _stream_pod_log(pod_id: str, agent_id: str, log_path: str, stop_event: threading.Event) -> None:
-    """
-    Background thread: SSH tail -f on the remote train.log and print each line
-    prefixed with [pod-log][agent_id]. Runs until stop_event is set.
-    """
+def _stream_pod_log(pod_id: str, agent_id: str, log_path: str, stop_event: threading.Event, proc_ref: list) -> None:
+    """Stream pod logs over SSH in a background thread."""
     host, port = get_pod_ssh_info(pod_id)
     try:
         proc = subprocess.Popen(
@@ -145,6 +144,7 @@ def _stream_pod_log(pod_id: str, agent_id: str, log_path: str, stop_event: threa
             stderr=subprocess.DEVNULL,
             text=True,
         )
+        proc_ref.append(proc)
         while not stop_event.is_set():
             line = proc.stdout.readline()
             if line:
@@ -160,34 +160,23 @@ def _poll_heartbeat(pod_id: str, agent_id: str, local_results_dir: str,
                     poll_interval_s: int = 60,
                     startup_max_missing: int = 20,
                     running_max_missing: int = 5) -> None:
-    """
-    Poll heartbeat.json from the pod every `poll_interval_s` seconds.
-
-    Two phases:
-      - Startup: tolerates up to `startup_max_missing` consecutive misses
-        (default 20 × 60s = 20 min) while the model downloads and loads.
-      - Running: once the first heartbeat is seen, only tolerates
-        `running_max_missing` consecutive misses (default 5 × 60s = 5 min)
-        before flagging as stuck.
-
-    Also launches a background thread that streams train.log live to stdout.
-    """
-    remote_hb = f"{REMOTE_RESULTS}/{agent_id}/heartbeat.json"
-    local_hb = f"{local_results_dir}/{agent_id}/heartbeat.json"
-    log_path = f"{REMOTE_RESULTS}/{agent_id}/train.log"
+    """Poll the remote heartbeat.json and update the local copy."""
+    remote_hb = f"/workspace/results/{agent_id}/heartbeat.json"
+    local_hb = os.path.join(local_results_dir, agent_id, "heartbeat.json")
     Path(f"{local_results_dir}/{agent_id}").mkdir(parents=True, exist_ok=True)
 
-    missing = 0
-    first_heartbeat_seen = False
     stop_log = threading.Event()
-
+    log_path = f"/workspace/results/{agent_id}/training.log"
+    proc_ref = []
     log_thread = threading.Thread(
         target=_stream_pod_log,
-        args=(pod_id, agent_id, log_path, stop_log),
+        args=(pod_id, agent_id, log_path, stop_log, proc_ref),
         daemon=True,
     )
     log_thread.start()
-    print(f"[runpod_agent][{agent_id}] Live log streaming started (pod train.log)")
+
+    missing = 0
+    first_heartbeat_seen = False
 
     try:
         while True:
@@ -204,6 +193,7 @@ def _poll_heartbeat(pod_id: str, agent_id: str, local_results_dir: str,
                 missing = 0
                 first_heartbeat_seen = True
                 if status in ("completed", "failed"):
+                    print(f"[runpod_agent][{agent_id}] Polling stopped (status={status}).")
                     break
             except Exception as e:
                 missing += 1
@@ -217,6 +207,8 @@ def _poll_heartbeat(pod_id: str, agent_id: str, local_results_dir: str,
                     break
     finally:
         stop_log.set()
+        if proc_ref and proc_ref[0].poll() is None:
+            proc_ref[0].terminate()
 
 
 @weave.op(name="RunPodAgent")
@@ -246,6 +238,7 @@ def run_grpo_on_runpod(
     try:
         # 1. Provision
         pod_id = create_training_pod(name=f"autorl-{agent_id}")
+        ACTIVE_PODS[agent_id] = pod_id
 
         # 2. Wait
         if not wait_for_pod(pod_id):
@@ -284,6 +277,15 @@ def run_grpo_on_runpod(
         local_result = f"{local_agent_dir}/eval_result.json"
 
         scp_from_pod(pod_id, remote_result, local_result)
+
+        remote_infer = f"{REMOTE_RESULTS}/{agent_id}/inference_results.json"
+        local_infer = f"{local_agent_dir}/inference_results.json"
+        try:
+            scp_from_pod(pod_id, remote_infer, local_infer)
+            print(f"[runpod_agent][{agent_id}] inference_results.json downloaded")
+        except Exception:
+            print(f"[runpod_agent][{agent_id}] inference_results.json not found (non-fatal)")
+
         with open(local_result) as f:
             result = json.load(f)
         print(f"[runpod_agent][{agent_id}] Result: mean_return={result.get('mean_return', '?')}")
@@ -295,6 +297,7 @@ def run_grpo_on_runpod(
                 "status": "failed", "mean_return": 0.0, "error": str(e)}
 
     finally:
+        ACTIVE_PODS.pop(agent_id, None)
         if pod_id and terminate_after:
             try:
                 terminate_pod(pod_id)

@@ -100,10 +100,23 @@ def _read_heartbeats(run_dir: str) -> list[dict]:
     return out
 
 
+def _read_plan(run_dir: str) -> list[dict]:
+    """Read spawn_plan.json from a run directory."""
+    plan_path = Path(run_dir) / "spawn_plan.json"
+    if plan_path.exists():
+        try:
+            return json.loads(plan_path.read_text())
+        except Exception:
+            pass
+    return []
+
+
 def _read_results(run_dir: str) -> list[dict]:
     """Read every eval_result.json in the run directory."""
     out = []
     p = Path(run_dir)
+    if not p.exists():
+        return out
     for agent_dir in sorted(p.iterdir()):
         r_path = agent_dir / "eval_result.json"
         if r_path.exists():
@@ -122,6 +135,54 @@ def _read_sentinel_log(run_dir: str) -> list[dict]:
         except Exception:
             pass
     return []
+
+
+def _infer_disk_status(plan: list[dict], heartbeats: list[dict], results: list[dict]) -> str:
+    """Infer run status from files so UI survives backend reloads."""
+    planned_ids = {entry.get("id") for entry in plan if entry.get("id")}
+    result_ids = {result.get("agent_id") for result in results if result.get("agent_id")}
+
+    if planned_ids and planned_ids <= result_ids:
+        return "completed"
+
+    heartbeat_ids = {hb.get("agent_id") for hb in heartbeats if hb.get("agent_id")}
+    terminal_ids = {
+        hb.get("agent_id")
+        for hb in heartbeats
+        if hb.get("agent_id") and hb.get("status") in ("completed", "failed")
+    }
+    if planned_ids and planned_ids <= heartbeat_ids and planned_ids <= terminal_ids:
+        return "completed" if results else "failed"
+
+    return "running"
+
+
+def _disk_run_snapshot(run_name: str) -> dict[str, Any] | None:
+    """Recover a run from autorl/runs/{run_name} after reloads."""
+    if Path(run_name).name != run_name:
+        return None
+
+    run_dir = RUNS_BASE / run_name
+    if not run_dir.exists():
+        return None
+
+    plan = _read_plan(str(run_dir))
+    heartbeats = _read_heartbeats(str(run_dir))
+    results = _read_results(str(run_dir))
+    sentinel_log = _read_sentinel_log(str(run_dir))
+
+    if not plan and not heartbeats and not results:
+        return None
+
+    return {
+        "task": "",
+        "run_dir": str(run_dir),
+        "plan": plan,
+        "status": _infer_disk_status(plan, heartbeats, results),
+        "results": results,
+        "heartbeats": heartbeats,
+        "sentinel_log": sentinel_log,
+    }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -201,12 +262,17 @@ def get_status(run_name: str) -> dict:
     Frontend polls this every 5 s to update the race dashboard.
     """
     run = _runs.get(run_name)
-    if not run:
+    disk = _disk_run_snapshot(run_name)
+    if not run and not disk:
         raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
 
+    if disk and (not run or disk["status"] == "completed"):
+        _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log")}
+        run = _runs[run_name]
+
     run_dir = run["run_dir"]
-    heartbeats = _read_heartbeats(run_dir)
-    sentinel_log = _read_sentinel_log(run_dir)
+    heartbeats = disk["heartbeats"] if disk else _read_heartbeats(run_dir)
+    sentinel_log = disk["sentinel_log"] if disk else _read_sentinel_log(run_dir)
 
     return {
         "run_name": run_name,
@@ -221,12 +287,17 @@ def get_status(run_name: str) -> dict:
 def get_results(run_name: str) -> dict:
     """Return final eval results + best checkpoint once the swarm is done."""
     run = _runs.get(run_name)
-    if not run:
+    disk = _disk_run_snapshot(run_name)
+    if not run and not disk:
         raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
 
+    if disk and (not run or disk["status"] == "completed"):
+        _runs[run_name] = {k: v for k, v in disk.items() if k not in ("heartbeats", "sentinel_log")}
+        run = _runs[run_name]
+
     run_dir = run["run_dir"]
-    results = _read_results(run_dir)
-    sentinel_log = _read_sentinel_log(run_dir)
+    results = disk["results"] if disk else _read_results(run_dir)
+    sentinel_log = disk["sentinel_log"] if disk else _read_sentinel_log(run_dir)
 
     # Pick best by mean_return.
     completed = [r for r in results if r.get("status") == "completed"]
@@ -238,6 +309,35 @@ def get_results(run_name: str) -> dict:
         "results": results,
         "best": best,
         "sentinel_log": sentinel_log,
+    }
+
+
+# ── GRPO inference results ────────────────────────────────────────────────────
+
+@app.get("/api/inference/{run_name}/{agent_id}")
+def get_inference(run_name: str, agent_id: str) -> dict:
+    """Return the detailed inference showcase results for a GRPO agent."""
+    run = _runs.get(run_name) or _disk_run_snapshot(run_name)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run '{run_name}' not found")
+    run_dir = run.get("run_dir", "")
+    path = Path(run_dir) / agent_id / "inference_results.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No inference results yet")
+    with open(path) as f:
+        data = json.load(f)
+
+    eval_path = Path(run_dir) / agent_id / "eval_result.json"
+    wandb_artifact = ""
+    if eval_path.exists():
+        with open(eval_path) as f:
+            ev = json.load(f)
+        wandb_artifact = ev.get("wandb_artifact", "")
+
+    return {
+        "agent_id": agent_id,
+        "wandb_artifact": wandb_artifact,
+        "results": data,
     }
 
 

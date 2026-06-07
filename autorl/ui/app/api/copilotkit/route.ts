@@ -145,3 +145,7 @@ const { handleRequest } = copilotRuntimeNextJSAppRouterEndpoint({
 });
 
 export const POST = handleRequest;
+
+export function GET() {
+  return Response.json({ threads: [] });
+}

@@ -58,13 +58,26 @@ Rules
   • Keep the same algo and env as the original entry.
   • NEVER suggest lr >= 0.1 (high lr causes NaN).
   • NEVER repeat an lr that has already been tried and failed.
+  • Output ONLY a JSON object of numeric hyperparameters, no other text.
+
+Rules for SB3 agents (algo = PPO, SAC, A2C):
   • For nan_loss: suggest a much lower lr (1e-4 – 5e-4).
   • For stale / frozen: try a different seed; optionally adjust n_steps or ent_coef.
   • Be creative — vary multiple hparams if prior same-algo attempts all failed.
-  • Output ONLY a JSON object of numeric hyperparameters, no other text.
+  • Valid fields: lr, seed, n_steps, ent_coef, gamma.
 
-Output format (all fields optional except lr and seed):
+Rules for GRPO agents (algo = GRPO, env = Countdown):
+  • NEVER suggest n_steps, ent_coef, or gamma — these are SB3-only and ignored by GRPO.
+  • For stale / frozen: LOWER num_generations (e.g. 8 → 4) to reduce VRAM usage,
+    try a different seed, optionally lower temperature.
+  • For nan_loss: halve the lr and reduce num_generations.
+  • Valid fields: lr, seed, num_generations, temperature.
+
+Output format — SB3 example (all fields optional except lr and seed):
   {"lr": 0.0003, "seed": 9999, "n_steps": 1024, "ent_coef": 0.01, "gamma": 0.99}
+
+Output format — GRPO example (all fields optional except lr and seed):
+  {"lr": 1e-6, "seed": 7777, "num_generations": 4, "temperature": 0.9}
 """
 
 
@@ -74,6 +87,8 @@ class SentinelHparams(BaseModel):
     n_steps: int | None = None
     ent_coef: float | None = None
     gamma: float | None = None
+    num_generations: int | None = None
+    temperature: float | None = None
 
 
 _sentinel_agent = Agent(
@@ -148,7 +163,6 @@ async def _llm_suggest_hparams(
 # ─── Main sentinel loop ───────────────────────────────────────────────────────
 
 
-@weave.op(name="DoomLoopSentinel")
 async def run_sentinel(
     agent_ids: list[str],
     results_dir: str = "./results",
@@ -343,11 +357,18 @@ async def run_sentinel(
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
+    print("[sentinel] starting main loop")
     while not (stop_event and stop_event.is_set()):
         await _check_all()
-        await asyncio.sleep(CHECK_INTERVAL_S)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=CHECK_INTERVAL_S)
+            print("[sentinel] stop_event was set, breaking loop")
+            break
+        except asyncio.TimeoutError:
+            pass
 
     # Final sweep: catch anomalies written just before the swarm shuts down.
+    print("[sentinel] doing final sweep")
     await _check_all()
     print("[sentinel] stopped")
     print(f"[sentinel] intervention log → {log_path}")

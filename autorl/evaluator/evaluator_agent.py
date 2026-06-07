@@ -151,7 +151,6 @@ Output ONLY a JSON array, no other text:
 # ── Main evaluator ────────────────────────────────────────────────────────────
 
 
-@weave.op(name="Evaluator")
 async def evaluate_results(results: list[EvalResult], run_dir: str) -> dict:
     """Rank all results and write rankings.json to run_dir."""
 

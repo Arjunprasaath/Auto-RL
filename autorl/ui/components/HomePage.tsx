@@ -32,6 +32,10 @@ interface EvalResult {
   agent_id: string; algo: string; env: string; status: string;
   mean_return: number; std_return: number; checkpoint_path: string;
 }
+interface InferenceCase {
+  numbers: number[]; target: number; prompt: string;
+  model_response: string; success: boolean;
+}
 interface HistPt { steps: number; reward: number; seg: number; }
 type Phase = "idle" | "planning" | "plan_ready" | "launching" | "racing" | "done" | "error";
 type AnimState = "vanish" | "appear" | "idle";
@@ -339,7 +343,7 @@ function LiveAgentCard({
   const pct         = hb ? Math.min(100, (hb.steps_completed / maxSteps) * 100) : 0;
   const currentSeg = history.length > 0 ? history[history.length - 1].seg : 0;
   const latestIntervention = sentinelEntries.at(-1);
-  const canInfer  = entry.algo !== "GRPO";
+  const isGrpo = entry.algo === "GRPO";
 
   const STATUS_COLOR: Record<string, string> = {
     training: "bg-green-900 text-green-300",
@@ -365,14 +369,14 @@ function LiveAgentCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          {canInfer && (
-            <button onClick={onInfer} disabled={inferring}
-              className={`text-xs px-2 py-0.5 rounded-lg font-semibold transition-colors
-                ${inferring ? "bg-gray-800 text-gray-500 cursor-not-allowed" :
-                  "bg-gray-800 text-gray-400 hover:bg-violet-900 hover:text-violet-300 border border-gray-700"}`}>
-              {inferring ? "⏳ recording…" : fmeta.inferLabel}
-            </button>
-          )}
+          <button onClick={onInfer} disabled={inferring}
+            className={`text-xs px-2 py-0.5 rounded-lg font-semibold transition-colors
+              ${inferring ? "bg-gray-800 text-gray-500 cursor-not-allowed" :
+                "bg-gray-800 text-gray-400 hover:bg-violet-900 hover:text-violet-300 border border-gray-700"}`}>
+            {inferring
+              ? (isGrpo ? "⏳ loading…" : "⏳ recording…")
+              : (isGrpo ? "🧪 test cases" : "▶ infer")}
+          </button>
           <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[status] ?? "bg-gray-800 text-gray-500"}`}>
             {status}
           </span>
@@ -618,6 +622,51 @@ function SentinelBanner({ entry }: { entry: SentinelEntry }) {
   );
 }
 
+// ── Inference showcase (GRPO test cases) ──────────────────────────────────
+
+function InferenceShowcase({ cases, agentId, wandbArtifact }: {
+  cases: InferenceCase[]; agentId: string; wandbArtifact?: string;
+}) {
+  const passed = cases.filter(c => c.success).length;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold text-gray-300">
+          Inference Showcase — <span className="font-mono text-orange-400">{agentId}</span>
+        </p>
+        <span className="text-xs text-gray-500">{passed}/{cases.length} correct</span>
+      </div>
+      {wandbArtifact && (
+        <p className="text-xs text-gray-500">
+          Model artifact: <span className="font-mono text-violet-400">{wandbArtifact}</span> (W&B)
+        </p>
+      )}
+      <div className="space-y-2">
+        {cases.map((c, i) => (
+          <div key={i} className={`rounded-xl border p-3 space-y-2
+            ${c.success ? "bg-emerald-950/40 border-emerald-800" : "bg-red-950/40 border-red-800"}`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm">{c.success ? "✅" : "❌"}</span>
+                <span className="text-xs font-mono text-gray-400">
+                  [{c.numbers.join(", ")}] → {c.target}
+                </span>
+              </div>
+              <span className={`text-xs font-bold px-2 py-0.5 rounded-full
+                ${c.success ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"}`}>
+                {c.success ? "PASS" : "FAIL"}
+              </span>
+            </div>
+            <div className="bg-black/30 rounded-lg p-2 text-xs font-mono text-gray-300 whitespace-pre-wrap max-h-32 overflow-y-auto">
+              {c.model_response || "(empty response)"}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Video modal ───────────────────────────────────────────────────────────────
 
 function VideoModal({
@@ -721,6 +770,8 @@ export default function HomePage() {
   const [inferring,   setInferring]   = useState<Record<string, boolean>>({});
   const [videos,      setVideos]      = useState<Record<string, string>>({});
   const [videoModal,  setVideoModal]  = useState<{ agentId: string; url: string; envId: string; envFamily: EnvFamily } | null>(null);
+  const [grpoInfer,   setGrpoInfer]   = useState<Record<string, InferenceCase[]>>({});
+  const [wandbArtifacts, setWandbArtifacts] = useState<Record<string, string>>({});
 
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -789,6 +840,48 @@ export default function HomePage() {
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
+  // ── Persist active run to localStorage so UI survives refresh ────────────────
+
+  useEffect(() => {
+    if (phase === "racing" && runName && runDir && plan.length > 0) {
+      localStorage.setItem("autorl_active_run", JSON.stringify({ runName, runDir, task, plan }));
+    }
+  }, [phase, runName, runDir, task, plan]);
+
+  useEffect(() => {
+    if (phase === "done" || phase === "idle") {
+      localStorage.removeItem("autorl_active_run");
+    }
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase === "done" && best?.algo === "GRPO" && !grpoInfer[best.agent_id]) {
+      handleGrpoInfer(best.agent_id);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, best]);
+
+  // ── Resume active run on mount ───────────────────────────────────────────────
+
+  useEffect(() => {
+    const saved = localStorage.getItem("autorl_active_run");
+    if (!saved) return;
+
+    try {
+      const { runName: savedName, runDir: savedDir, task: savedTask, plan: savedPlan } = JSON.parse(saved);
+      if (savedName && savedDir && savedPlan?.length) {
+        setRunName(savedName);
+        setRunDir(savedDir);
+        setTask(savedTask ?? "");
+        setPlan(savedPlan);
+        setPhase("racing");
+        startPolling(savedName);
+      }
+    } catch {
+      localStorage.removeItem("autorl_active_run");
+    }
+  }, [startPolling]);
+
   // ── Handlers ─────────────────────────────────────────────────────────────────
 
   const handleGeneratePlan = async () => {
@@ -818,7 +911,32 @@ export default function HomePage() {
     } catch (e) { setErrorMsg(e instanceof Error ? e.message : String(e)); setPhase("error"); }
   };
 
+  const handleGrpoInfer = async (agentId: string) => {
+    if (grpoInfer[agentId]) return;
+    setInferring(p => ({ ...p, [agentId]: true }));
+    try {
+      const res = await fetch(`${BACKEND}/api/inference/${runName}/${agentId}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail ?? res.statusText);
+      }
+      const data = await res.json();
+      setGrpoInfer(p => ({ ...p, [agentId]: data.results }));
+      if (data.wandb_artifact) {
+        setWandbArtifacts(p => ({ ...p, [agentId]: data.wandb_artifact }));
+      }
+    } catch (e) {
+      alert(`Inference failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setInferring(p => ({ ...p, [agentId]: false }));
+    }
+  };
+
   const handleInfer = async (agentId: string) => {
+    const entry = plan.find(e => e.id === agentId);
+    if (entry?.algo === "GRPO") {
+      return handleGrpoInfer(agentId);
+    }
     setInferring(p => ({ ...p, [agentId]: true }));
     const entry = plan.find(e => e.id === agentId);
     const envId    = entry?.env ?? "";
@@ -843,9 +961,11 @@ export default function HomePage() {
 
   const handleReset = () => {
     if (pollRef.current) clearInterval(pollRef.current);
+    localStorage.removeItem("autorl_active_run");
     setPhase("idle"); setTask(""); setPlan([]); setRunName(""); setRunDir("");
     setHeartbeats([]); setSentinel([]); setResults([]); setBest(null); setErrorMsg("");
     setHistory({}); setAnimStates({}); setInferring({}); setVideos({}); setVideoModal(null);
+    setGrpoInfer({}); setWandbArtifacts({});
     prevSentinelCount.current = {};
     setTimeout(() => textareaRef.current?.focus(), 50);
   };
@@ -1050,26 +1170,42 @@ export default function HomePage() {
                       disabled={!!inferring[best.agent_id]}
                       className="ml-auto text-xs px-3 py-1.5 rounded-lg bg-emerald-800 hover:bg-emerald-700 text-emerald-200 font-semibold transition-colors disabled:opacity-50">
                       {inferring[best.agent_id]
-                        ? "⏳ Recording…"
-                        : `${ENV_FAMILY_META[detectEnvFamily(best.env)].icon} Watch inference`}
+                        ? (best.algo === "GRPO" ? "⏳ Loading…" : "⏳ Recording…")
+                        : (best.algo === "GRPO"
+                          ? (grpoInfer[best.agent_id] ? "✅ Test cases loaded" : "🧪 View test cases")
+                          : "▶ Watch inference")}
                     </button>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-center mb-3">
                     <div className="bg-black/20 rounded-lg p-2">
-                      <p className="text-2xl font-bold text-emerald-300">{best.mean_return.toFixed(0)}</p>
+                      <p className="text-2xl font-bold text-emerald-300">{best.mean_return.toFixed(2)}</p>
                       <p className="text-xs text-gray-400">mean return</p>
                     </div>
                     <div className="bg-black/20 rounded-lg p-2">
-                      <p className="text-2xl font-bold text-gray-300">±{best.std_return.toFixed(0)}</p>
+                      <p className="text-2xl font-bold text-gray-300">±{best.std_return.toFixed(2)}</p>
                       <p className="text-xs text-gray-400">std</p>
                     </div>
                   </div>
+                  {wandbArtifacts[best.agent_id] && (
+                    <p className="text-xs text-gray-500 mb-2">
+                      W&B artifact: <span className="font-mono text-violet-400">{wandbArtifacts[best.agent_id]}</span>
+                    </p>
+                  )}
                   {history[best.agent_id]?.length >= 2 && (
                     <div className="bg-black/20 rounded-lg p-2">
                       <MiniChart history={history[best.agent_id]} algoRgb={as(best.algo).rgb} hasNaN={false} />
                     </div>
                   )}
                 </div>
+              )}
+
+              {/* GRPO inference showcase for winning agent */}
+              {best && grpoInfer[best.agent_id] && (
+                <InferenceShowcase
+                  cases={grpoInfer[best.agent_id]}
+                  agentId={best.agent_id}
+                  wandbArtifact={wandbArtifacts[best.agent_id]}
+                />
               )}
 
               {/* All agent cards with infer */}

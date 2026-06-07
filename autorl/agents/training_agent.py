@@ -70,20 +70,29 @@ def _write_failed(entry: SpawnPlanEntry, results_dir: str) -> None:
 
 
 async def kill_training_agent(agent_id: str) -> bool:
-    """Terminate a running training subprocess. Returns True if a process was killed."""
+    """Terminate a running training subprocess or RunPod pod. Returns True if killed."""
     proc = PROCESSES.get(agent_id)
-    if not proc or proc.returncode is not None:
-        return False
-    proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=10)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-    return True
+    if proc and proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+        return True
+
+    from pod_manager.runpod_agent import ACTIVE_PODS
+    from pod_manager.pod_manager import terminate_pod
+
+    pod_id = ACTIVE_PODS.pop(agent_id, None)
+    if pod_id:
+        terminate_pod(pod_id)
+        print(f"[{agent_id}] RunPod pod {pod_id} terminated by sentinel")
+        return True
+
+    return False
 
 
-@weave.op(name="TrainingAgent")
 async def run_training_agent(
     entry: SpawnPlanEntry,
     results_dir: str,

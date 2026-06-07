@@ -37,7 +37,6 @@ def _collect_results(plan: list[SpawnPlanEntry], results_dir: str) -> list[EvalR
     return results
 
 
-@weave.op(name="SwarmRunner")
 async def run_swarm(plan: list[SpawnPlanEntry], results_dir: str) -> list[EvalResult]:
     stop_event = asyncio.Event()
     sentinel_task = asyncio.create_task(
@@ -48,11 +47,20 @@ async def run_swarm(plan: list[SpawnPlanEntry], results_dir: str) -> list[EvalRe
         for entry in plan
     ]
 
+    RUNPOD_OVERHEAD_MIN = 10  # pod creation + deps + code upload
+    has_runpod = any(e.exec == "runpod" for e in plan)
     max_budget = max(e.time_budget_min for e in plan) + 2  # 2 min grace
+    if has_runpod:
+        max_budget += RUNPOD_OVERHEAD_MIN
+    print(f"[swarm] waiting for training tasks (timeout={max_budget}m, runpod={has_runpod})...")
     await asyncio.wait(training_tasks, timeout=max_budget * 60)
+    print("[swarm] training tasks finished waiting")
 
+    print("[swarm] setting stop event")
     stop_event.set()
+    print("[swarm] awaiting sentinel task")
     await sentinel_task
+    print("[swarm] sentinel task done")
     return _collect_results(plan, results_dir)
 
 

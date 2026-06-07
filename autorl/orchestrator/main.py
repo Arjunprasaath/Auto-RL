@@ -41,47 +41,62 @@ from evaluator.evaluator_agent import evaluate_results
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _render_best_mujoco(best: dict, run_dir: str) -> str | None:
-    """Render an MP4 for the best MuJoCo agent; return the output path or None."""
-    ckpt = best.get("checkpoint_path", "")
-    algo = best.get("algo", "")
-    env  = best.get("env", "")
+def _render_best_mujoco(best_result: dict, run_dir: str) -> str | None:
+    script_path = os.path.join(_PKG_ROOT, "model_viewer", "render_model.py")
+    checkpoint_path = best_result.get("checkpoint_path")
+    env_id = best_result.get("env")
 
-    if not ckpt or not os.path.exists(ckpt) or algo not in ("PPO", "SAC", "A2C"):
-        print(f"[main] skipping video render — checkpoint not available ({ckpt!r})")
+    if not checkpoint_path or not env_id or not os.path.exists(checkpoint_path):
+        print("[pipeline] best MuJoCo model missing checkpoint, skipping render")
         return None
 
-    output = os.path.join(run_dir, "best_mujoco.mp4")
-    # Also mirror to results/ for the UI's /api/video endpoint
-    results_copy = os.path.join(_PKG_ROOT, "results", "best_mujoco.mp4")
+    out_video = os.path.join(run_dir, "best_model.mp4")
+    print(f"[pipeline] rendering {env_id} from {checkpoint_path}...")
 
-    render_script = os.path.join(_PKG_ROOT, "model_viewer", "render_mujoco.py")
     cmd = [
-        sys.executable, render_script,
-        "--checkpoint", ckpt,
-        "--env-id",     env,
-        "--algo",       algo,
-        "--output",     output,
-        "--n-steps",    "500",
+        sys.executable,
+        script_path,
+        "--checkpoint", checkpoint_path,
+        "--env", env_id,
+        "--output", out_video,
     ]
-    print(f"[main] rendering best model → {output}")
     try:
-        subprocess.run(cmd, check=True, cwd=_PKG_ROOT)
-        # Copy to results/ so the UI can find it immediately
-        os.makedirs(os.path.dirname(results_copy), exist_ok=True)
-        import shutil
-        shutil.copy2(output, results_copy)
-        print(f"[main] video saved: {output}")
-        return output
+        subprocess.run(cmd, check=True)
+        return out_video
     except subprocess.CalledProcessError as e:
-        print(f"[main] render failed (exit {e.returncode}) — continuing without video")
+        print(f"[pipeline] render failed: {e}")
+        return None
+
+
+def _render_best_countdown(best_result: dict, run_dir: str) -> str | None:
+    """Render an example generation for the best Countdown (GRPO) model."""
+    script_path = os.path.join(_PKG_ROOT, "model_viewer", "render_countdown.py")
+    checkpoint_path = best_result.get("checkpoint_path")
+    
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        print("[pipeline] best Countdown model missing checkpoint, skipping render")
+        return None
+
+    out_json = os.path.join(run_dir, "best_countdown_example.json")
+    print(f"[pipeline] rendering Countdown example from {checkpoint_path}...")
+
+    cmd = [
+        sys.executable,
+        script_path,
+        "--checkpoint", checkpoint_path,
+        "--output", out_json,
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+        return out_json
+    except subprocess.CalledProcessError as e:
+        print(f"[pipeline] render failed: {e}")
         return None
 
 
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 
-@weave.op(name="AutoRL_Pipeline")
 async def pipeline(task: str, run_dir: str) -> dict:
     """Full AutoRL pipeline: orchestrate → train → evaluate → render."""
 
@@ -106,11 +121,14 @@ async def pipeline(task: str, run_dir: str) -> dict:
     print(f"{'='*60}")
     rankings: dict = await evaluate_results(results, run_dir)
 
-    # ── Step 4: render best MuJoCo model ──────────────────────────────────────
+    # ── Step 4: render best models ────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"[pipeline] step 4 — model render")
     print(f"{'='*60}")
+    
     mujoco_rankings = rankings.get("MuJoCo", [])
+    countdown_rankings = rankings.get("Countdown", [])
+    
     video_path: str | None = None
     if mujoco_rankings:
         best_entry = mujoco_rankings[0]
@@ -120,6 +138,16 @@ async def pipeline(task: str, run_dir: str) -> dict:
         )
         if best_result:
             video_path = _render_best_mujoco(best_result, run_dir)
+            
+    example_path: str | None = None
+    if countdown_rankings:
+        best_entry = countdown_rankings[0]
+        best_agent_id = best_entry.get("agent_id")
+        best_result = next(
+            (r.model_dump() for r in results if r.agent_id == best_agent_id), None
+        )
+        if best_result:
+            example_path = _render_best_countdown(best_result, run_dir)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     summary = {
@@ -129,32 +157,32 @@ async def pipeline(task: str, run_dir: str) -> dict:
         "n_results": len(results),
         "rankings": rankings,
         "video_path": video_path,
+        "example_path": example_path,
     }
 
     summary_path = os.path.join(run_dir, "pipeline_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
 
-    _print_summary(rankings, video_path)
+    _print_summary(rankings, video_path, example_path)
     return summary
 
 
-def _print_summary(rankings: dict, video_path: str | None) -> None:
+def _print_summary(rankings: dict, video_path: str | None, example_path: str | None = None) -> None:
     print(f"\n{'='*60}")
     print("[pipeline] COMPLETE")
     print(f"{'='*60}")
+    
     for group, entries in rankings.items():
-        if not entries:
-            continue
-        print(f"\n{group}:")
-        for e in entries:
-            rank    = e.get("rank", "?")
-            aid     = e.get("agent_id", "?")
-            algo    = e.get("algo", "?")
-            rat     = e.get("rationale", "")[:80]
-            print(f"  {rank}. {algo} ({aid}) — {rat}")
+        if entries:
+            best = entries[0]
+            print(f"Best {group} model: {best.get('algo')} ({best.get('agent_id')}) — return={best.get('mean_return')}")
+            print(f"  Rationale: {best.get('rationale', '')[:100]}...")
+            
     if video_path:
-        print(f"\nVideo: {video_path}")
+        print(f"\nMuJoCo Render saved to: {video_path}")
+    if example_path:
+        print(f"\nCountdown Example saved to: {example_path}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
