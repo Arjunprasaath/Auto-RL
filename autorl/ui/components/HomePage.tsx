@@ -29,6 +29,34 @@ interface SentinelEntry {
   llm_suggested_hparams: Record<string, unknown>; outcome: string;
   doctor_stderr?: string;
   rationale?: string;
+  attempt?: number;
+  heartbeat_at_failure?: Record<string, unknown>;
+}
+
+const FAILURE_LABELS: Record<string, string> = {
+  nan_loss: "NaN loss",
+  stale_heartbeat_nudge: "Stale heartbeat — nudge",
+  stale_after_nudge: "Stale after nudge — restart",
+  nan_loss_second_failure: "NaN on retry — killed",
+  stale_second_failure: "Stale on retry — killed",
+  environment_setup_error: "Missing dependency / setup error",
+};
+
+function failureLabel(reason: string): string {
+  return FAILURE_LABELS[reason] ?? reason.replace(/_/g, " ");
+}
+
+function outcomeLabel(outcome: string): string {
+  const labels: Record<string, string> = {
+    fixed_retrying: "fixed — retrying",
+    fix_failed: "fix failed",
+    nudge_sent: "nudge sent (lr/seed adjusted)",
+    killed_permanently: "killed permanently",
+    completed: "restart succeeded",
+    failed_again: "restart failed again",
+    pending: "intervention in progress",
+  };
+  return labels[outcome] ?? outcome.replace(/_/g, " ");
 }
 interface EvalResult {
   agent_id: string; algo: string; env: string; status: string;
@@ -415,6 +443,16 @@ function LiveAgentCard({
           <span className={`border px-2 py-0.5 ${st.tag}`}>{entry.algo}</span>
           <span className="text-stone-600">{entry.id}</span>
           {hasCustomReward && <span className="text-teal-600 text-xs">★</span>}
+          {sentinelEntries.length > 0 && (
+            <span className="text-yellow-600 text-xs" title="doom-loop sentinel events">
+              ⚠×{sentinelEntries.length}
+            </span>
+          )}
+          {doctorEntries.length > 0 && (
+            <span className="text-cyan-600 text-xs" title="env-doctor fixes">
+              🩺×{doctorEntries.length}
+            </span>
+          )}
           {currentSeg > 0 && <span className="text-yellow-500 text-sm">restart×{currentSeg}</span>}
         </div>
         <div className="flex items-center gap-2.5">
@@ -450,12 +488,19 @@ function LiveAgentCard({
           ))}
         </div>
       )}
-      {latestIntervention && currentSeg > 0 && (
+      {latestIntervention && (
         <div className="px-3 py-2 border-b border-stone-200 bg-amber-50">
-          <p className="text-yellow-500 mb-0.5 text-sm">sentinel restart #{currentSeg}</p>
-          <p className="text-stone-600 text-sm">
-            {Object.entries(latestIntervention.llm_suggested_hparams).map(([k, v]) => `${k}=${v}`).join(" · ")}
+          <p className="text-yellow-600 mb-0.5 text-sm">
+            doom loop · {failureLabel(latestIntervention.failure_reason)}
           </p>
+          {Object.keys(latestIntervention.llm_suggested_hparams ?? {}).length > 0 && (
+            <p className="text-stone-600 text-sm">
+              GPT → {Object.entries(latestIntervention.llm_suggested_hparams)
+                .filter(([k]) => k !== "fix_commands")
+                .map(([k, v]) => `${k}=${v}`).join(" · ")}
+            </p>
+          )}
+          <p className="text-amber-700 text-xs mt-0.5">→ {outcomeLabel(latestIntervention.outcome)}</p>
         </div>
       )}
 
@@ -700,20 +745,22 @@ const ENV_SCALE_NOTE: Record<string, string> = {
 };
 
 function Leaderboard({
-  plan, heartbeats, results, sentinel, phase,
+  plan, heartbeats, results, sentinel, doctorLog, phase,
 }: {
   plan: SpawnEntry[]; heartbeats: Heartbeat[]; results: EvalResult[];
-  sentinel: SentinelEntry[]; phase: "racing" | "done";
+  sentinel: SentinelEntry[]; doctorLog: SentinelEntry[];
+  phase: "racing" | "done";
 }) {
   const VALID_STATUSES = new Set(["completed", "early_stopped", "race_dropout"]);
   const rows = plan.map(entry => {
     const hb  = heartbeats.find(h => h.agent_id === entry.id);
     const res = results.find(r => r.agent_id === entry.id);
     const sentCount = sentinel.filter(s => s.agent_id === entry.id).length;
+    const docCount  = doctorLog.filter(d => d.agent_id === entry.id).length;
     return {
       id: entry.id, algo: entry.algo, env: entry.env,
       score: phase === "done" && res ? res.mean_return : (hb?.current_reward ?? -Infinity),
-      status: hb?.status ?? "waiting", restarts: sentCount,
+      status: hb?.status ?? "waiting", restarts: sentCount, doctorFixes: docCount,
       done:      phase === "done" && res != null && VALID_STATUSES.has(res.status),
       failed:    phase === "done" && res != null && !VALID_STATUSES.has(res.status),
       earlyStop: phase === "done" && res?.status === "early_stopped",
@@ -761,7 +808,8 @@ function Leaderboard({
                 <span className={i === 0 && !row.failed ? "text-amber-400" : "text-stone-500"}>{rankIcon}</span>
                 <span className={`border px-1.5 ${st.tag}`}>{row.algo}</span>
                 <span className="text-stone-600 flex-1 truncate">{row.id}</span>
-                {row.restarts > 0 && <span className="text-yellow-600 text-sm">↩{row.restarts}</span>}
+                {row.restarts > 0 && <span className="text-yellow-600 text-sm" title="sentinel events">⚠{row.restarts}</span>}
+                {row.doctorFixes > 0 && <span className="text-cyan-600 text-sm" title="env-doctor fixes">🩺{row.doctorFixes}</span>}
                 <span className={`font-bold ${row.failed ? "text-red-600" : row.score > 0 ? "text-green-400" : "text-stone-600"}`}>
                   {formatScore(row.score, row.env)}
                 </span>
@@ -778,58 +826,117 @@ function Leaderboard({
   );
 }
 
-// ── Sentinel banner ───────────────────────────────────────────────────────────
+// ── Sentinel / env-doctor trace banners ────────────────────────────────────────
 
-function SentinelBanner({ entry }: { entry: SentinelEntry }) {
+function SentinelBanner({ entry, compact = false }: { entry: SentinelEntry; compact?: boolean }) {
   const isDoctor  = entry.failure_reason === "environment_setup_error";
   const fixOk     = entry.outcome === "fixed_retrying";
   const isKilled  = entry.outcome === "killed_permanently";
+  const isNudge   = entry.outcome === "nudge_sent";
   const cmds: string[] = (entry.llm_suggested_hparams?.fix_commands as string[]) ?? [];
+  const hparams = Object.entries(entry.llm_suggested_hparams ?? {}).filter(([k]) => k !== "fix_commands");
+  const ts = new Date(entry.timestamp).toLocaleTimeString();
 
   if (isDoctor) {
     return (
       <div className={`border text-sm ${fixOk ? "border-cyan-300 bg-cyan-50" : "border-orange-300 bg-orange-50"}`}>
-        <div className="px-3 py-2.5 border-b border-stone-200 flex items-center gap-2">
-          <span className={fixOk ? "text-cyan-700" : "text-orange-700"}>env-doctor</span>
-          <span className="text-stone-600">{entry.agent_id}</span>
-          <span className="text-stone-500 ml-auto text-sm">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+        <div className="px-3 py-2 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+          <span className={fixOk ? "text-cyan-700 font-semibold" : "text-orange-700 font-semibold"}>env-doctor</span>
+          <span className="text-stone-600 font-mono">{entry.agent_id}</span>
+          {entry.attempt != null && entry.attempt > 1 && (
+            <span className="text-stone-500 text-xs">attempt {entry.attempt}</span>
+          )}
+          <span className="text-stone-500 ml-auto text-xs">{ts}</span>
         </div>
-        {cmds.length > 0 && (
+        {!compact && cmds.length > 0 && (
           <div className="px-3 py-2 space-y-1">
-            {cmds.map((c, i) => <p key={i} className="text-stone-600">$ {c}</p>)}
+            {cmds.map((c, i) => <p key={i} className="text-stone-600 font-mono text-xs">$ {c}</p>)}
           </div>
         )}
-        {entry.rationale && <p className="px-3 pb-2 text-stone-500">{entry.rationale}</p>}
-        <p className={`px-3 pb-2 ${fixOk ? "text-cyan-700" : "text-red-600"}`}>
-          → {fixOk ? "fixed — retrying" : "fix failed"}
+        {compact && cmds.length > 0 && (
+          <p className="px-3 py-1.5 text-stone-600 font-mono text-xs truncate">$ {cmds[0]}{cmds.length > 1 ? ` (+${cmds.length - 1})` : ""}</p>
+        )}
+        {!compact && entry.rationale && <p className="px-3 pb-1 text-stone-500 text-xs">{entry.rationale}</p>}
+        {!compact && entry.doctor_stderr && (
+          <details className="px-3 pb-2">
+            <summary className="text-stone-500 cursor-pointer text-xs">stderr tail</summary>
+            <pre className="mt-1 text-xs bg-stone-100 p-2 overflow-x-auto whitespace-pre-wrap text-stone-600">{entry.doctor_stderr}</pre>
+          </details>
+        )}
+        <p className={`px-3 py-2 text-xs ${fixOk ? "text-cyan-700" : "text-red-600"}`}>
+          → {outcomeLabel(entry.outcome)}
         </p>
       </div>
     );
   }
 
   return (
-    <div className={`flex items-start gap-3 rounded-xl p-3 border text-sm
-      ${isKilled ? "bg-red-50 border-red-200" : "bg-amber-50 border-amber-200"}`}>
-      <span className="text-sm mt-0.5">{isKilled ? "🔴" : "⚠️"}</span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1 flex-wrap">
-          <span className="font-bold text-amber-700 text-sm">Sentinel</span>
-          <span className="font-mono text-sm text-stone-600">{entry.agent_id}</span>
-          <span className="text-sm text-stone-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
-        </div>
-        <div className="bg-stone-100 rounded-lg p-2 font-mono text-sm space-y-1">
-          {entry.failed_hparams && (
-            <p className="text-red-700">Failed: {Object.entries(entry.failed_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
-          )}
-          {entry.llm_suggested_hparams && Object.keys(entry.llm_suggested_hparams).length > 0 && (
-            <p className="text-green-700">GPT → {Object.entries(entry.llm_suggested_hparams).map(([k,v]) => `${k}=${v}`).join(" ")}</p>
-          )}
-        </div>
-        <p className={`text-sm mt-1 font-semibold
-          ${entry.outcome === "completed" ? "text-green-600" : isKilled ? "text-red-600" : "text-amber-600"}`}>
-          → {entry.outcome}
-        </p>
+    <div className={`border text-sm ${isKilled ? "bg-red-50 border-red-200" : isNudge ? "bg-yellow-50 border-yellow-200" : "bg-amber-50 border-amber-200"}`}>
+      <div className="px-3 py-2 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+        <span className="font-semibold text-amber-700 text-xs">doom loop</span>
+        <span className="font-mono text-stone-600 text-xs">{entry.agent_id}</span>
+        <span className="text-stone-500 text-xs">{failureLabel(entry.failure_reason)}</span>
+        <span className="text-stone-400 ml-auto text-xs">{ts}</span>
       </div>
+      {!compact && hparams.length > 0 && (
+        <div className="px-3 py-2 bg-stone-50 font-mono text-xs space-y-0.5">
+          {Object.keys(entry.failed_hparams ?? {}).length > 0 && (
+            <p className="text-red-700">
+              was: {Object.entries(entry.failed_hparams).map(([k, v]) => `${k}=${v}`).join(" ")}
+            </p>
+          )}
+          <p className="text-green-700">
+            GPT → {hparams.map(([k, v]) => `${k}=${v}`).join(" ")}
+          </p>
+        </div>
+      )}
+      {compact && hparams.length > 0 && (
+        <p className="px-3 py-1.5 text-stone-600 font-mono text-xs truncate">
+          GPT → {hparams.map(([k, v]) => `${k}=${v}`).join(" ")}
+        </p>
+      )}
+      <p className={`px-3 py-2 text-xs font-medium
+        ${entry.outcome === "completed" ? "text-green-600" : isKilled ? "text-red-600" : isNudge ? "text-yellow-700" : "text-amber-600"}`}>
+        → {outcomeLabel(entry.outcome)}
+      </p>
+    </div>
+  );
+}
+
+function InterventionTracePanel({
+  sentinel, doctorLog, phase,
+}: {
+  sentinel: SentinelEntry[];
+  doctorLog: SentinelEntry[];
+  phase: "racing" | "done";
+}) {
+  const events = [...doctorLog, ...sentinel]
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  return (
+    <div className="border border-stone-200 bg-white p-4 overflow-y-auto max-h-72 shrink-0">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-stone-600 uppercase tracking-widest text-xs">doom loop trace</span>
+        <span className={`text-xs ${phase === "racing" && events.length > 0 ? "text-amber-500 animate-pulse" : "text-stone-500"}`}>
+          {events.length === 0
+            ? (phase === "racing" ? "watching" : "none")
+            : `${events.length} event${events.length !== 1 ? "s" : ""}`}
+        </span>
+      </div>
+      <p className="text-stone-500 text-xs mb-2 leading-relaxed">
+        Sentinel recovers training failures (NaN, stale heartbeats). Env-doctor fixes missing deps.
+      </p>
+      {events.length === 0 ? (
+        <p className="text-stone-400 text-sm italic py-2">
+          {phase === "racing" ? "No interventions yet — agents training normally." : "No doom-loop or env-doctor events this run."}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {events.map((e, i) => (
+            <SentinelBanner key={`${e.timestamp}-${e.agent_id}-${i}`} entry={e} compact />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1127,6 +1234,7 @@ export default function HomePage() {
   const prevSentinelCount = useRef<Record<string, number>>({});
   const pollRef           = useRef<ReturnType<typeof setInterval> | null>(null);
   const sseRef            = useRef<EventSource | null>(null);
+  const lastStatusFetch   = useRef(0);
   const textareaRef       = useRef<HTMLTextAreaElement>(null);
 
   const handleStatusData = useCallback((data: {
@@ -1215,7 +1323,8 @@ export default function HomePage() {
             return { ...prev, [hb.agent_id]: [...pts, { steps: hb.steps_completed, reward: hb.current_reward, seg: 0 }] };
           return prev;
         });
-        if (Math.random() < 0.1) {
+        if (Date.now() - lastStatusFetch.current >= POLL_MS) {
+          lastStatusFetch.current = Date.now();
           fetch(`${BACKEND}/api/status/${name}`).then(r => r.ok ? r.json() : null)
             .then(data => { if (data) handleStatusData(data, name); }).catch(() => {});
         }
@@ -1690,6 +1799,19 @@ export default function HomePage() {
           </div>
           <p className="text-stone-500 text-sm italic mb-4">&ldquo;{task}&rdquo;</p>
 
+          {(sentinel.length > 0 || doctorLog.length > 0) && (
+            <div className="border border-amber-300 bg-amber-50 px-3 py-2 text-sm mb-4 flex items-center gap-3 flex-wrap">
+              <span className="text-amber-600 font-semibold">doom loop active</span>
+              {sentinel.length > 0 && (
+                <span className="text-stone-600">{sentinel.length} sentinel event{sentinel.length !== 1 ? "s" : ""}</span>
+              )}
+              {doctorLog.length > 0 && (
+                <span className="text-cyan-700">{doctorLog.length} env-doctor fix{doctorLog.length !== 1 ? "es" : ""}</span>
+              )}
+              <span className="text-stone-500 text-xs">see trace panel →</span>
+            </div>
+          )}
+
           <div className="flex gap-5 items-start">
             <div className="flex-1 min-w-0 space-y-3 max-h-[calc(100vh-200px)] overflow-y-auto pr-1">
               {plan.map(e => (
@@ -1701,24 +1823,20 @@ export default function HomePage() {
                   rewardCode={getAgentRewardCode(e, rewardCode)}
                   onViewReward={() => openRewardView(e.id)} />
               ))}
-              {doctorLog.length > 0 && (
+              {(doctorLog.length > 0 || sentinel.length > 0) && (
                 <div className="space-y-2 pt-2">
-                  <Divider label="env-doctor" />
-                  {doctorLog.map((e, i) => <SentinelBanner key={i} entry={e} />)}
-                </div>
-              )}
-              {sentinel.length > 0 && (
-                <div className="space-y-2 pt-2">
-                  <Divider label="sentinel" />
-                  {sentinel.map((e, i) => <SentinelBanner key={i} entry={e} />)}
+                  <Divider label="intervention log (full detail)" />
+                  {doctorLog.map((e, i) => <SentinelBanner key={`d-${i}`} entry={e} />)}
+                  {sentinel.map((e, i) => <SentinelBanner key={`s-${i}`} entry={e} />)}
                 </div>
               )}
               <p className="text-stone-500 text-sm text-center py-2">polling every 2 s</p>
             </div>
             <div className="w-72 xl:w-80 shrink-0 sticky top-6 flex flex-col gap-3 max-h-[calc(100vh-100px)]">
               <div className="border border-stone-200 bg-white p-4 overflow-y-auto flex-1 min-h-0">
-                <Leaderboard plan={plan} heartbeats={heartbeats} results={[]} sentinel={sentinel} phase="racing" />
+                <Leaderboard plan={plan} heartbeats={heartbeats} results={[]} sentinel={sentinel} doctorLog={doctorLog} phase="racing" />
               </div>
+              <InterventionTracePanel sentinel={sentinel} doctorLog={doctorLog} phase="racing" />
               <RewardSidebarPanel
                 plan={plan} globalCode={rewardCode}
                 onViewAgent={openRewardView}
@@ -1842,24 +1960,20 @@ export default function HomePage() {
                   onViewReward={() => openRewardView(e.id)} />
               ))}
 
-              {doctorLog.length > 0 && (
+              {(doctorLog.length > 0 || sentinel.length > 0) && (
                 <div className="space-y-2 pt-2">
-                  <Divider label="env-doctor log" />
-                  {doctorLog.map((e, i) => <SentinelBanner key={i} entry={e} />)}
-                </div>
-              )}
-              {sentinel.length > 0 && (
-                <div className="space-y-2 pt-2">
-                  <Divider label="sentinel log" />
-                  {sentinel.map((e, i) => <SentinelBanner key={i} entry={e} />)}
+                  <Divider label="intervention log (full detail)" />
+                  {doctorLog.map((e, i) => <SentinelBanner key={`d-${i}`} entry={e} />)}
+                  {sentinel.map((e, i) => <SentinelBanner key={`s-${i}`} entry={e} />)}
                 </div>
               )}
             </div>
 
             <div className="w-72 xl:w-80 shrink-0 sticky top-6 flex flex-col gap-3 max-h-[calc(100vh-100px)]">
               <div className="border border-stone-200 bg-white p-4 overflow-y-auto flex-1 min-h-0">
-                <Leaderboard plan={plan} heartbeats={heartbeats} results={results} sentinel={sentinel} phase="done" />
+                <Leaderboard plan={plan} heartbeats={heartbeats} results={results} sentinel={sentinel} doctorLog={doctorLog} phase="done" />
               </div>
+              <InterventionTracePanel sentinel={sentinel} doctorLog={doctorLog} phase="done" />
               <RewardSidebarPanel
                 plan={plan} globalCode={rewardCode}
                 onViewAgent={openRewardView}
