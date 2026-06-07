@@ -938,7 +938,6 @@ export default function HomePage() {
       return handleGrpoInfer(agentId);
     }
     setInferring(p => ({ ...p, [agentId]: true }));
-    const entry = plan.find(e => e.id === agentId);
     const envId    = entry?.env ?? "";
     const envFamily = detectEnvFamily(envId);
     try {
