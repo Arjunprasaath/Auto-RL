@@ -294,7 +294,8 @@ def _finalize(plan: list[SpawnPlanEntry], path: str) -> list[SpawnPlanEntry]:
 
 @weave.op(name="Orchestrator")
 async def create_spawn_plan(task: str, path: str) -> list[SpawnPlanEntry]:
-    prompt = task
+    history_block = _build_history_context()
+    prompt = f"{task}\n\n{history_block}" if history_block else task
     for attempt in range(2):
         try:
             raw = (await Runner.run(_orchestrator, prompt)).final_output.entries
@@ -306,6 +307,58 @@ async def create_spawn_plan(task: str, path: str) -> list[SpawnPlanEntry]:
             prompt = f"{task}\n\nPrevious attempt failed: {e}. Fix the JSON."
     print("[orchestrator] using hard-coded default plan")
     return _finalize(_validate_plan(list(_DEFAULT_PLAN)), path)
+
+
+def _build_history_context() -> str:
+    """Fetch past run results from Redis and format them as Orchestrator context.
+
+    Returns an empty string when Redis is unavailable or no history exists.
+    The block is injected into the user prompt so the LLM can avoid known-bad
+    configs and explore around known-good ones.
+    """
+    try:
+        from coordination.redis_coordinator import coordinator
+        pairs = coordinator.get_all_history_envs()
+        if not pairs:
+            return ""
+
+        lines: list[str] = [
+            "## Past run results (use this to inform your hyperparameter choices)",
+            "Avoid configs marked status=nan_loss or status=failed.",
+            "Explore learning rates near top-performing configs.",
+            "",
+        ]
+        # Group by env so the LLM sees a clean per-environment summary
+        by_env: dict[str, list[str]] = {}
+        for algo, env in pairs:
+            history = coordinator.get_run_history(algo, env, top_n=4)
+            if not history:
+                continue
+            env_lines = by_env.setdefault(env, [])
+            for h in history:
+                lr     = h.get("lr")
+                ret    = h.get("mean_return", 0.0)
+                status = h.get("status", "?")
+                n_st   = h.get("n_steps")
+                extras = f" n_steps={n_st}" if n_st else ""
+                env_lines.append(
+                    f"  {algo:4s}  lr={lr}{extras}  →  mean_return={ret:>8.1f}  [{status}]"
+                )
+
+        if not by_env:
+            return ""
+
+        for env, env_lines in sorted(by_env.items()):
+            lines.append(f"### {env}")
+            lines.extend(sorted(env_lines, key=lambda l: float(l.split("mean_return=")[1].split()[0]), reverse=True))
+            lines.append("")
+
+        context = "\n".join(lines)
+        print(f"[orchestrator] injecting history context ({len(by_env)} env(s), {sum(len(v) for v in by_env.values())} runs)")
+        return context
+    except Exception as e:  # noqa: BLE001
+        print(f"[orchestrator] history context skipped ({e})")
+        return ""
 
 
 def main():

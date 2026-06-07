@@ -115,6 +115,17 @@ async def pipeline(task: str, run_dir: str) -> dict:
     results: list[EvalResult] = await run_swarm(plan, run_dir)
     print(f"[pipeline] swarm done — {len(results)}/{len(plan)} results collected")
 
+    # ── Write results to Redis history for future Orchestrator RAG ────────────
+    try:
+        from coordination.redis_coordinator import coordinator as _coord
+        plan_by_id = {e.id: e for e in plan}
+        for r in results:
+            hp = plan_by_id[r.agent_id].hparams if r.agent_id in plan_by_id else {}
+            _coord.record_run_result(r.algo, r.env, hp, r.mean_return, r.status)
+        print(f"[pipeline] {len(results)} result(s) recorded to Redis history")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[pipeline] Redis history write skipped ({_e})")
+
     # ── Step 3: evaluate and rank ─────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"[pipeline] step 3 — evaluator")

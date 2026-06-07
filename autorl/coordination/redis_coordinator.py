@@ -256,6 +256,84 @@ class RedisCoordinator:
         except Exception:  # noqa: BLE001
             return []
 
+    # ── Run history (RAG for Orchestrator) ───────────────────────────────────
+
+    def record_run_result(
+        self,
+        algo: str,
+        env: str,
+        hparams: dict,
+        mean_return: float,
+        status: str,
+    ) -> None:
+        """Persist a completed run result so future Orchestrators can learn from it.
+
+        Results are stored as a Redis sorted set keyed by algo+env.  The score
+        is mean_return so ZREVRANGE returns best-first.  We keep at most 20
+        entries per algo+env bucket — trim the tail so Redis stays lean.
+        """
+        r = self._sync()
+        if r is None:
+            return
+        key = f"autorl:history:{algo}:{env}"
+        try:
+            # Store the hparams + status as the member value; score = mean_return
+            member = json.dumps({
+                "lr":     hparams.get("lr"),
+                "seed":   hparams.get("seed"),
+                "n_steps": hparams.get("n_steps"),
+                "ent_coef": hparams.get("ent_coef"),
+                "gamma":  hparams.get("gamma"),
+                "status": status,
+            }, separators=(",", ":"))
+            pipe = r.pipeline()
+            pipe.zadd(key, {member: mean_return})
+            pipe.zremrangebyrank(key, 0, -21)   # keep at most 20 entries
+            pipe.expire(key, 7 * 86400)          # 7-day TTL
+            pipe.execute()
+        except Exception as e:  # noqa: BLE001
+            print(f"[coordinator] record_run_result failed ({e})")
+
+    def get_run_history(self, algo: str, env: str, top_n: int = 5) -> list[dict]:
+        """Return up to top_n past results for the given algo+env, best-first.
+
+        Each entry: {"lr": ..., "mean_return": ..., "status": ...}
+        Returns [] when Redis is unavailable or no history exists yet.
+        """
+        r = self._sync()
+        if r is None:
+            return []
+        key = f"autorl:history:{algo}:{env}"
+        try:
+            rows = r.zrevrange(key, 0, top_n - 1, withscores=True)
+            result = []
+            for member, score in rows:
+                entry = json.loads(member)
+                entry["mean_return"] = round(score, 2)
+                result.append(entry)
+            return result
+        except Exception as e:  # noqa: BLE001
+            print(f"[coordinator] get_run_history failed ({e})")
+            return []
+
+    def get_all_history_envs(self) -> list[tuple[str, str]]:
+        """Return (algo, env) pairs that have any history stored."""
+        r = self._sync()
+        if r is None:
+            return []
+        try:
+            keys = r.keys("autorl:history:*:*")
+            result = []
+            for key in keys:
+                parts = key.split(":")  # autorl:history:{algo}:{env}
+                if len(parts) >= 4:
+                    algo = parts[2]
+                    env  = ":".join(parts[3:])   # env may contain colons
+                    result.append((algo, env))
+            return result
+        except Exception:  # noqa: BLE001
+            return []
+
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
 

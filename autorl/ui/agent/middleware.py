@@ -80,6 +80,26 @@ def _load_run(run_name: str) -> dict[str, Any] | None:
     return _disk_run_snapshot(run_name)
 
 
+def _record_history(results: list, plan: list[dict]) -> None:
+    """Push each completed result into the Redis history so future Orchestrators
+    can learn from it.  Uses the original hparams from the spawn plan since
+    eval_result only stores a subset of fields.
+    """
+    plan_by_id = {e["id"]: e for e in plan if isinstance(e, dict)}
+    for r in results:
+        try:
+            agent_id = r.agent_id if hasattr(r, "agent_id") else r.get("agent_id", "")
+            algo     = r.algo     if hasattr(r, "algo")     else r.get("algo", "")
+            env      = r.env      if hasattr(r, "env")      else r.get("env", "")
+            status   = r.status   if hasattr(r, "status")   else r.get("status", "")
+            ret      = r.mean_return if hasattr(r, "mean_return") else r.get("mean_return", 0.0)
+            hparams  = plan_by_id.get(agent_id, {}).get("hparams", {})
+            if algo and env:
+                _coord.record_run_result(algo, env, hparams, float(ret), str(status))
+        except Exception as e:  # noqa: BLE001
+            print(f"[backend] history record failed for {r}: {e}")
+
+
 # ── Request / response models ─────────────────────────────────────────────────
 
 class PlanRequest(BaseModel):
@@ -265,6 +285,8 @@ async def start_run(req: RunRequest) -> dict:
         try:
             results = await run_swarm(plan, req.run_dir)
             _runs[run_name]["results"] = [r.model_dump() for r in results]
+            # Persist results to Redis history so future Orchestrators can use them
+            _record_history(results, plan)
             # Run LLM evaluator so the UI gets rankings, not just raw results
             try:
                 rankings = await evaluate_results(results, req.run_dir)
